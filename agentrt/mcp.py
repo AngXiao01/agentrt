@@ -3,7 +3,9 @@
 对照 Claude Code 源码 src/services/mcp/ 与 src/tools/MCPTool/：
 - 配置格式沿用 `{"mcpServers": {名字: {"command", "args", "env"}}}`（~/.claude.json、.mcp.json 都是这个格式）。
 - 工具名 `mcp__<server>__<tool>`（源码同样的命名），避免和内置工具重名。
-- 工具声明 `annotations.readOnlyHint` 才算只读（可并行、无需确认）；其余走正常权限流程（默认要确认）。
+- 只读（可并行、无需确认）要两个条件：工具声明了 `annotations.readOnlyHint`，**并且**配置里把这个 server 标成
+  `"trusted": true`（agentrt 自己的字段）。MCP 规范说注解只是提示，除非 server 可信，不能当真——不然任何 server
+  把删除工具标成只读，就能免确认执行。其余一律走正常权限流程（默认要确认）。
 - 没有实现：HTTP / SSE 传输、OAuth、resources / prompts、list_changed 通知、工具延迟加载（源码的 ToolSearch）。
 传输：换行分隔的 JSON-RPC 2.0（官方 Python SDK 的 stdio 传输就是这样）。server 的 env 只传给该子进程，
 不进日志、不进 prompt；子进程只额外拿到 PATH / HOME / LANG。
@@ -126,17 +128,18 @@ def _safe(s: str) -> str:
 
 
 class McpTool(Tool):
-    """一个 MCP 工具。read_only 取自 annotations.readOnlyHint；没声明就当成会改动东西，要确认。"""
+    """一个 MCP 工具。只有可信 server 的 annotations.readOnlyHint 才算数；其余当成会改动东西，要确认。"""
     risk = "medium"
 
-    def __init__(self, client: McpClient, spec: dict):
+    def __init__(self, client: McpClient, spec: dict, trusted: bool = False):
         self.client, self.remote_name = client, spec["name"]
         self.name = f"mcp__{_safe(client.name)}__{_safe(spec['name'])}"
         self.description = (spec.get("description") or "").strip().split("\n")[0][:300] or f"{client.name} 的 {spec['name']}"
         schema = spec.get("inputSchema") or {}
         self.parameters = {"type": "object", "properties": schema.get("properties", {}),
                            "required": schema.get("required", [])}
-        self.read_only = bool((spec.get("annotations") or {}).get("readOnlyHint"))
+        self.declared_read_only = bool((spec.get("annotations") or {}).get("readOnlyHint"))
+        self.read_only = trusted and self.declared_read_only
 
     def subject(self, args: dict) -> str:
         return json.dumps(args, ensure_ascii=False, sort_keys=True)[:200]
@@ -180,5 +183,5 @@ def load_mcp_tools(path: str, only: Optional[list[str]] = None) -> tuple[list[To
             warns.append(f"{name}：{e}")
             continue
         clients.append(c)
-        tools += [McpTool(c, s) for s in specs]
+        tools += [McpTool(c, s, trusted=cfg.get("trusted") is True) for s in specs]
     return tools, clients, warns

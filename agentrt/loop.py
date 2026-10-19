@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +83,17 @@ INTERRUPT_MSG = "[用户中断了本次请求]"
 INTERRUPT_TOOL = "[中断] 用户中断，这个调用没有执行。"
 INTERRUPTED = ("[中断] 上次执行在返回结果之前被中断，结果未知（可能已经生效，也可能没有）。"
                "先检查当前状态，再决定要不要重做。")
+START_TOLERANCE = 3.0  # 秒：核对进程组的启动时间，防止进程组号被别的进程复用后误杀
+
+
+def _proc_start_time(pid: int) -> Optional[float]:
+    """进程的启动时间（epoch 秒，精度 1 秒）；拿不到返回 None。macOS 和 Linux 的 ps 都支持 lstart。"""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=5, env={**os.environ, "LC_ALL": "C"}).stdout.strip()
+        return time.mktime(time.strptime(" ".join(out.split()), "%a %b %d %H:%M:%S %Y")) if out else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 class Agent:
@@ -112,8 +126,14 @@ class Agent:
         self._cancel = threading.Event()  # 用户中断（对应 Claude Code 的 abortController）
         self._live: list[dict] = []  # 最近一次循环里的消息列表（压缩会换新列表，所以单独记一份）
         self._chat_started = False
+        self.ctx.on_spawn = self._on_spawn
 
     # ------------------------------------------------------------ 事件
+    def _on_spawn(self, call_id: str, pgid: int) -> None:
+        """工具起了子进程：先把进程组号和启动时间落盘，再去等它的结果。
+        子进程在独立的进程组里（超时时才能整组杀掉），代价是主进程被杀时它不会跟着退出。"""
+        self._emit({"type": "tool_proc", "call_id": call_id, "pgid": pgid, "started_at": round(time.time(), 3)})
+
     def _emit(self, event: dict) -> None:
         with self._lock:
             rec = self.log.append(event)
@@ -185,8 +205,10 @@ class Agent:
             for c in pending:
                 call = ToolCall(c["id"], c["name"], c.get("arguments") or {})
                 tool = self.tools.get(call.name)
+                # 崩溃前起的子进程可能还活着、还在改工作区：先清理，模型接下来检查到的状态才可信
+                note = self._reap(st.procs.get(c["id"])) if c["id"] in st.started else ""
                 if c["id"] in st.started and not (tool and tool.is_read_only(c.get("arguments") or {})):
-                    messages.append(self._tool_result(call, INTERRUPTED, error=True))
+                    messages.append(self._tool_result(call, INTERRUPTED + note, error=True))
                 else:
                     messages.append(self._execute(call))
         elif last["role"] == "assistant":
@@ -196,6 +218,36 @@ class Agent:
                 self.result.final = last.get("content") or ""
                 return self._finish("end_turn", t0)
         return self._drive(messages, t0)
+
+    def _reap(self, proc: Optional[dict]) -> str:
+        """终止崩溃前留下的进程组，返回要附在回填信息里的说明。
+        为什么终止而不是等它跑完：管道已断，等完也拿不到输出，还得定等待上限；终止的结果更确定，
+        代价是命令可能只执行了一部分，所以要在回填里写明。"""
+        if not proc or not proc.get("pgid"):
+            return ""
+        pgid = int(proc["pgid"])
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return "（该命令的进程已经退出。）"
+        except PermissionError:
+            return "（无法确认该命令的进程是否还在运行。）"
+        started, recorded = _proc_start_time(pgid), proc.get("started_at")
+        if started is not None and recorded is not None and abs(started - float(recorded)) > START_TOLERANCE:
+            self._emit({"type": "reap", "pgid": pgid, "action": "skip_reused"})
+            return f"（进程组号 {pgid} 现在属于别的进程（启动时间对不上），没有终止；原命令的进程已经不在了。）"
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):   # macOS：组里只剩僵尸进程时 killpg 报 EPERM
+            return "（该命令的进程已经退出。）"
+        for _ in range(100):
+            try:
+                os.killpg(pgid, 0)
+                time.sleep(0.02)
+            except (ProcessLookupError, PermissionError):  # 同上：已经死了、只等父进程回收
+                break
+        self._emit({"type": "reap", "pgid": pgid, "action": "killed", "verified_start": started is not None})
+        return f"（恢复时该命令的进程组 {pgid} 仍在运行，已强制终止；命令可能只执行了一部分。）"
 
     # ------------------------------------------------------------ 主循环
     def _drive(self, messages: list[dict], t0: float) -> RunResult:
@@ -373,12 +425,15 @@ class Agent:
                     "read_only": tool.is_read_only(call.arguments), "decision": d.source})
         t0 = time.time()
         error = False
+        self.ctx._local.call_id = call.id   # 工具起子进程时据此记 tool_proc（并行时各线程各记各的）
         try:
             out = tool.run(call.arguments, self.ctx)
         except ToolError as e:
             out, error = f"[工具错误] {e}", True
         except Exception as e:  # noqa: BLE001 — 工具内部异常也要回填给模型，而不是让循环崩掉
             out, error = f"[工具异常] {type(e).__name__}: {e}", True
+        finally:
+            self.ctx._local.call_id = None
         dt = time.time() - t0
         with self._lock:
             r.tool_seconds += dt

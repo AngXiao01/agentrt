@@ -339,3 +339,87 @@ def test_assistant_toolset_is_small():
     names = [t.name for t in assistant_tools()]
     assert len(names) == 9 and "bash" not in names and "write_file" not in names
     assert {t.name for t in assistant_tools() if not t.read_only} == {"move_file", "copy_file", "trash"}
+
+
+# ---------------------------------------------------------------- 崩溃恢复：残留的子进程
+# 场景：bash 用 start_new_session=True 起子进程（超时时才能整组杀掉），主进程被 kill -9 后子进程还在跑。
+# 以前 resume 只告诉模型“结果未知，先检查”，可旧命令还在运行，模型检查到的是过时的状态，重做就会执行两次。
+
+def _crash_log(tmp_path, ws, pgid, started_at):
+    """伪造“bash 起了进程、结果没写就崩溃”的日志。"""
+    log = EventLog(tmp_path / "s.jsonl")
+    args = {"command": "sleep 30; echo paid >> ledger.txt"}
+    asst = {"role": "assistant", "content": "...", "tool_calls": [{"id": "t1_0", "name": "bash", "arguments": args}]}
+    for e in [{"type": "session_start", "task": "t", "workspace": str(ws)},
+              {"type": "message", "message": {"role": "system", "content": "S"}},
+              {"type": "message", "message": {"role": "user", "content": "task"}},
+              {"type": "message", "message": asst},
+              {"type": "tool_start", "call_id": "t1_0", "name": "bash", "arguments": args},
+              {"type": "tool_proc", "call_id": "t1_0", "pgid": pgid, "started_at": started_at}]:
+        log.append(e)
+    return log
+
+
+def _resume(tmp_path, ws, log):
+    llm = ScriptedLLM(["已检查"])
+    agent = Agent(llm, ws, log, permissions=PermissionEngine("bypass"), context=ContextManager(llm))
+    assert agent.resume().status == "end_turn"
+    return [m for m in llm.calls[0] if m["role"] == "tool"][0]["content"]
+
+
+def test_bash_records_its_process_group_before_waiting(make_agent):
+    agent, llm, ws, log = make_agent([call("bash", command="echo hi"), "完成"], mode="bypass")
+    agent.run("x")
+    ev = log.events()
+    i_start = next(i for i, e in enumerate(ev) if e["type"] == "tool_start")
+    i_proc = next(i for i, e in enumerate(ev) if e["type"] == "tool_proc")
+    i_res = next(i for i, e in enumerate(ev) if e["type"] == "tool_result")
+    assert i_start < i_proc < i_res and ev[i_proc]["pgid"] > 0 and ev[i_proc]["call_id"] == ev[i_start]["call_id"]
+
+
+def test_resume_kills_orphan_process_group(tmp_path):
+    import os
+    import subprocess
+    import time
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    orphan = subprocess.Popen("sleep 30; echo paid >> ledger.txt", shell=True, cwd=ws, start_new_session=True)
+    log = _crash_log(tmp_path, ws, orphan.pid, time.time())
+    msg = _resume(tmp_path, ws, log)
+    orphan.wait(timeout=2)                                   # 进程组已被终止
+    with pytest.raises(ProcessLookupError):
+        os.killpg(orphan.pid, 0)
+    assert msg.startswith(INTERRUPTED) and "已强制终止" in msg
+    assert any(e["type"] == "reap" and e["action"] == "killed" for e in log.events())
+    assert not (ws / "ledger.txt").exists()                  # 副作用不会在恢复之后才发生
+
+
+def test_resume_orphan_already_exited(tmp_path):
+    import subprocess
+    import time
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    p = subprocess.Popen("true", shell=True, start_new_session=True)
+    p.wait()
+    log = _crash_log(tmp_path, ws, p.pid, time.time())
+    msg = _resume(tmp_path, ws, log)
+    assert "已经退出" in msg and not any(e["type"] == "reap" for e in log.events())
+
+
+def test_resume_does_not_kill_a_reused_process_group(tmp_path):
+    import os
+    import signal
+    import subprocess
+    import time
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    other = subprocess.Popen("sleep 30", shell=True, start_new_session=True)   # 同一个号，现在是别的进程
+    try:
+        log = _crash_log(tmp_path, ws, other.pid, time.time() - 3600)          # 日志里记的是一小时前起的进程
+        msg = _resume(tmp_path, ws, log)
+        os.killpg(other.pid, 0)                                                 # 还活着：没有误杀
+        assert "没有终止" in msg
+        assert any(e["type"] == "reap" and e["action"] == "skip_reused" for e in log.events())
+    finally:
+        os.killpg(other.pid, signal.SIGKILL)
+        other.wait()

@@ -87,6 +87,7 @@ class ReplayState:
         self.messages: list[dict] = []
         self.started: dict[str, dict] = {}   # call_id -> tool_start 事件
         self.finished: set[str] = set()
+        self.procs: dict[str, dict] = {}     # call_id -> tool_proc 事件（进程组号、启动时间）
         self.ended: Optional[dict] = None
         self.turns = 0
         for e in events:
@@ -97,6 +98,8 @@ class ReplayState:
                     self.turns += 1
             elif t == "tool_start":
                 self.started[e["call_id"]] = e
+            elif t == "tool_proc":
+                self.procs[e["call_id"]] = e
             elif t == "tool_result":
                 self.finished.add(e["call_id"])
                 self.messages.append({"role": "tool", "tool_call_id": e["call_id"], "name": e["name"],

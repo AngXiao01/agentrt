@@ -10,9 +10,10 @@ import os
 import re
 import signal
 import subprocess
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 @dataclass
@@ -20,6 +21,15 @@ class ToolContext:
     workspace: Path
     bash_timeout: float = 30.0
     max_output_chars: int = 20000
+    # 起子进程的工具调用 spawned(进程组号)，由主循环记成 tool_proc 事件，崩溃恢复时据此清理残留进程。
+    # 只读调用会并行执行，所以“当前是哪个调用”按线程记。
+    on_spawn: Optional[Callable[[str, int], None]] = None
+    _local: threading.local = field(default_factory=threading.local, repr=False, compare=False)
+
+    def spawned(self, pgid: int) -> None:
+        cid = getattr(self._local, "call_id", None)
+        if self.on_spawn and cid:
+            self.on_spawn(cid, pgid)
 
 
 class ToolError(Exception):
@@ -190,6 +200,7 @@ class Bash(Tool):
         proc = subprocess.Popen(args["command"], shell=True, cwd=ctx.workspace, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 start_new_session=True)
+        ctx.spawned(proc.pid)  # start_new_session=True：pid 就是进程组号。先落盘再等结果
         try:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -201,7 +212,7 @@ class Bash(Tool):
 
 class SandboxedBash(Bash):
     """在 sandbox-exec 里执行（见 sandbox.py）：不能联网、只能写工作目录、不能删除 / 重命名、读不到主目录里的密钥。
-    只读命令（ls / du / find 不带 -exec 等）自动放行，其余要确认。"""
+    只读命令（ls / du / find 不带 -exec 等）自动放行，而且换成禁止一切写入的配置执行；其余要确认。"""
     description = ("在沙箱里执行 shell 命令（工作目录内）：用于解压、压缩、校验和、复杂统计等专用工具做不到的事。"
                    "不能联网；不能删除或重命名（删除用 trash，重命名用 move_file）；读不到工作目录之外的用户文件。")
 
@@ -216,8 +227,11 @@ class SandboxedBash(Bash):
         tmp.mkdir(parents=True, exist_ok=True)
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(ctx.workspace), "LANG": "C.UTF-8",
                "TMPDIR": str(tmp), "PYTHONIOENCODING": "utf-8"}
-        proc = subprocess.Popen(sandbox.argv(str(args["command"]), ctx.workspace), cwd=ctx.workspace, env=env,
+        ro = self.is_read_only(args)   # 判成只读的命令用“禁止写入”的配置跑：判错了也写不进去
+        proc = subprocess.Popen(sandbox.argv(str(args["command"]), ctx.workspace, read_only=ro, tmp=tmp),
+                                cwd=ctx.workspace, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        ctx.spawned(proc.pid)
         try:
             out, _ = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:

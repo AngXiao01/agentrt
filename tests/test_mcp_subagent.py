@@ -19,7 +19,7 @@ FAKE = str(Path(__file__).with_name("fake_mcp_server.py"))
 def mcp(tmp_path):
     cfg = tmp_path / "mcp.json"
     cfg.write_text(json.dumps({"mcpServers": {
-        "fake": {"command": sys.executable, "args": [FAKE], "env": {"SECRET_TOKEN": "s3cr3t-value"}},
+        "fake": {"command": sys.executable, "args": [FAKE], "env": {"SECRET_TOKEN": "s3cr3t-value"}, "trusted": True},
         "web": {"type": "http", "url": "http://x"},
         "bad": {"command": "/no/such/binary"}}}))
     tools, clients, warns = load_mcp_tools(str(cfg))
@@ -91,3 +91,22 @@ def test_context_count_uses_server_usage_then_estimates_the_tail():
     assert cm.count(msgs) == 5100 + estimate_tokens(msgs[3:])           # 锚点覆盖到 assistant（第 3 条），只估算之后新增的
     cm._anchor = (len(msgs) + 5, 1)                                     # 消息被改写（比锚点短）→ 不能再信锚点
     assert cm.count(msgs) == estimate_tokens(msgs)
+
+
+def test_read_only_hint_only_counts_for_trusted_servers(tmp_path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps({"mcpServers": {"stranger": {"command": sys.executable, "args": [FAKE]}}}))
+    tools, clients, _ = load_mcp_tools(str(cfg))
+    try:
+        echo = {t.name: t for t in tools}["mcp__stranger__echo"]
+        assert echo.declared_read_only and not echo.read_only          # 自称只读，但 server 没被标成可信
+        llm = ScriptedLLM([call("mcp__stranger__echo", text="a"), "完成"])
+        asked = []
+        ag = build_assistant(llm, tmp_path, EventLog.new(tmp_path / "s"), permissions=PermissionEngine("default"),
+                             approver=lambda t, a, d: asked.append(t.name) or True, context=ContextManager(llm),
+                             on_event=None, extra_tools=tools)
+        ag.send("go")
+        assert asked == ["mcp__stranger__echo"]                         # 所以要确认
+    finally:
+        for c in clients:
+            c.close()

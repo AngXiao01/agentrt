@@ -2,7 +2,7 @@
 
 一个最小但完整的 agent 运行时。结构对照 Claude Code v2.1.88 源码（query.ts 主循环、权限判定链、microcompact / autocompact、JSONL 会话），逐项对照结果见下文“和 Claude Code 源码的对应”，上下文策略参照 Manus 的 context engineering 六条原则。模型走 OpenAI 兼容接口，默认对接 51 上 vLLM 部署的 Gemma。
 
-只依赖 Python 标准库（3.9+）。运行时约 1,500 行，评测约 400 行，测试 103 个，评测任务 8 个。
+只依赖 Python 标准库（3.9+）。运行时约 3,200 行，评测约 400 行，测试 124 个，评测任务 8 个。
 
 ```
 agentrt/
@@ -98,9 +98,10 @@ python3 -m agentrt assistant --workspace ~/Downloads --once "把图片按月份�
 | 会话日志 | JSONL 事件日志，每条 fsync，`resume` 重放 | `utils/sessionStorage.ts` transcript JSONL；`conversationRecovery.ts` | 对应；**恢复语义不同**：源码 `filterUnresolvedToolUses` 直接丢弃没有结果的 tool_use，再追加 “Continue from where you left off.”，不重跑也不告诉模型结果未知；本实现保留调用，只读的重跑、写操作标“结果未知”——这样 trash 这类操作不会被模型悄悄重做 |
 | 任务清单 | `todo_write` 写 `.agentrt/todo.md` | `TodoWriteTool`，清单放在 appState，全部完成后清空 | 不同（落盘，便于恢复）；文件助手不带这个工具 |
 | 子 agent | `delegate`：独立上下文、只读白名单、只回摘要 | `AgentTool` | 对应；只有同步只读版 |
-| MCP | `mcp.py` stdio 客户端，工具名 `mcp__s__t`，readOnlyHint 决定免确认 | `services/mcp/`、`MCPTool` | 对应；没有 HTTP/SSE、OAuth、resources、ToolSearch |
+| MCP | `mcp.py` stdio 客户端，工具名 `mcp__s__t`；只有标成可信的 server，其 readOnlyHint 才免确认 | `services/mcp/`、`MCPTool` | 对应；没有 HTTP/SSE、OAuth、resources、ToolSearch |
 | token 计数 | 服务端 usage 锚点 + 粗估新增部分 | `utils/tokens.ts` tokenCountWithEstimation | 对应 |
-| skills / 流式 / 沙箱 | 没有 | `SkillTool`、流式、`sandbox-runtime` | 没有 |
+| bash 沙箱 | `sandbox.py`：macOS sandbox-exec（见下文） | `sandbox-runtime` | 只做了 macOS，没有逐项对照源码 |
+| skills / 流式 | 没有 | `SkillTool`、流式 | 没有 |
 
 ### 文件助手的工具：9 个基础 + delegate + 沙箱 bash
 
@@ -130,6 +131,7 @@ python3 -m agentrt assistant --workspace ~/Downloads --once "把图片按月份�
 | 进程崩溃 | 每个事件先 fsync 再往下走；`resume` 重放日志（多轮对话用 `turn_start` 区分“上一轮已结束”和“本轮被中断”） |
 | 等人确认时崩溃 | 确认发生在 `tool_start` 之前，恢复后该调用会重新走权限判定、重新问你；`permission` 事件记录批准/拒绝和等待时长 |
 | 崩溃时有工具“开始了但没结果” | 只读工具重跑（至少一次）；有副作用的不重跑，回填“结果未知，先检查状态”（至多一次） |
+| 崩溃时子进程还在跑 | bash 起子进程后先记 `tool_proc`（进程组号 + 启动时间，fsync）再等结果；`resume` 时这个进程组还活着就先终止、记 `reap`，回填里写明“已强制终止，命令可能只执行了一部分”。终止前核对启动时间，对不上说明进程组号被别的进程复用了，不杀 |
 | 日志最后一行写了一半 | 读取时丢弃 |
 | 模型输出的 JSON 不合法 | 错误信息回填，让模型自己改 |
 | 输出触到 max_tokens | 提示拆成多次写入 |
@@ -148,7 +150,7 @@ python3 -m agentrt assistant --workspace ~/Downloads --once "把图片按月份�
 - system prompt 声明工具结果是数据不是指令；`injection` 评测任务专门测这一条。
 - 无人值守默认 fail-closed（`deny` / `policy` 审批器）。
 
-**bash 不是沙箱。** `workspace_hook` 是正则启发式，`cat $(dirname $PWD)/x`、`python3 -c "import os; open(os.path.join(os.pardir, 'x'))"` 都能绕过（已实测）。要真隔离，得把 bash 放进容器或 bwrap / nsjail。`escape` 评测任务就是用来量化这个缺口的。
+**通用 `run` 里的 bash 不是沙箱**（文件助手的 bash 在沙箱里，见下文）。`workspace_hook` 是正则启发式，`cat $(dirname $PWD)/x`、`python3 -c "import os; open(os.path.join(os.pardir, 'x'))"` 都能绕过（已实测）。要真隔离，得把 bash 放进容器或 bwrap / nsjail。`escape` 评测任务就是用来量化这个缺口的。
 
 ## 评测
 
@@ -178,7 +180,7 @@ python3 -m evals.run_evals --variants baseline,tight_ctx --k 3           # 压�
 
 ```bash
 python3 -m pip install pytest
-python3 -m pytest -q        # 103 passed，不需要模型
+python3 -m pytest -q        # 124 个（3 个沙箱测试只在 macOS 上跑），不需要模型
 ```
 
 覆盖：文本协议解析与错误回填、Gemma 角色交替整形、HTTP 重试/退避/超长识别（假 vLLM 服务）、权限链各层（越界、危险命令、密钥、plan 模式、deny 优先于 allow）、超长输出落盘、autocompact 不切断调用与结果、reactive compact、断点恢复（副作用至多一次、只读重跑、网络中断后恢复、已结束会话不重复执行）、日志半行容错与脱敏、cached_tokens 统计、评测判定器自检（空操作失败、标准答案通过、改测试会被识破）。
@@ -191,7 +193,7 @@ python3 -m pytest -q        # 103 passed，不需要模型
 ```bash
 python3 -m agentrt run "任务" --mcp-config ~/.claude.json --mcp-only <server名>   # 只有通用的 run 支持；默认不接 MCP
 ```
-工具名 `mcp__<server>__<tool>`；只有 server 声明了 `readOnlyHint` 的工具才免确认、可并行，其余默认要确认。server 的 `env`（里面常有 API key）只传给该子进程，不进日志和 prompt。没有实现 HTTP/SSE、OAuth、resources、工具延迟加载（源码用 ToolSearch 避免把几十个工具说明塞进 prompt，所以接入前请用 `--mcp-only` 挑需要的）。
+工具名 `mcp__<server>__<tool>`；工具声明了 `readOnlyHint`、**并且**配置里该 server 标了 `"trusted": true`（agentrt 自己的字段），才免确认、可并行，其余默认要确认。注解是 server 自己说的，MCP 规范也说只有可信 server 的注解才能当真——不然一个 server 把删除工具标成只读，就能免确认执行。server 的 `env`（里面常有 API key）只传给该子进程，不进日志和 prompt。没有实现 HTTP/SSE、OAuth、resources、工具延迟加载（源码用 ToolSearch 避免把几十个工具说明塞进 prompt，所以接入前请用 `--mcp-only` 挑需要的）。
 
 **token 计数**：不引入 tokenizer。读源码 `utils/tokens.ts` 发现 Claude Code 自己也不跑 tokenizer：`tokenCountWithEstimation` = 上一次 API 返回的 usage + 其后新增消息的粗估（字符数 / 4）。本实现照此：`ContextManager.count` 以服务端报告的 `prompt + completion` 为锚点，只对锚点之后的新消息粗估；压缩改写了历史就作废锚点。比任何本地 tokenizer 都准（数的是服务端实际用的分词），也不依赖第三方库。
 
@@ -206,7 +208,9 @@ python3 -m agentrt run "任务" --mcp-config ~/.claude.json --mcp-only <server�
 | 工作目录内禁止 unlink | `rm`、`mv`、python 的 `os.remove` 都被拦：删除只能走 `trash`（进废纸篓），重命名走 `move_file` |
 | 禁止读用户主目录，只放开工作目录 | `~/.ssh`、`~/.openrouter_key`、`~/.claude.json` 都读不到 |
 
-权限：命令是只读的（`ls`、`du`、`find` 不带 `-exec/-delete`、`grep`、`unzip -l`、`tar -t`…，每段管道都在白名单里，且没有重定向 / 命令替换 / 多命令）就自动放行；其余要确认，`auto` 模式也要。`plan` 模式只放行只读命令。没有 `sandbox-exec` 时 bash 不会出现（失败即关闭），`--no-bash` 可手动关掉。
+权限：命令是只读的（`ls`、`du`、`find` 不带 `-exec/-delete`、`grep`、`unzip -l`、`tar -t`…，每段管道都在白名单里，且没有重定向 / 命令替换 / 多命令）就自动放行；其余要确认，`auto` 模式也要。
+
+**免确认的命令换一份更严的配置执行**：除了这次调用自己的临时目录（`.agentrt/tmp`）和 `/dev/null`，哪里都不许写。命令解析只决定要不要问你，能不能写由内核决定——解析判错了，结果也只是 Operation not permitted。这一层是因为解析确实会判错：`uniq a b`（第二个文件名是输出，会覆盖 b）、`sort -ox f`（`-o` 连写）、`file -C`（写 magic 文件）以前都被当成只读，现在解析和内核两层都会拦。`plan` 模式只放行只读命令。没有 `sandbox-exec` 时 bash 不会出现（失败即关闭），`--no-bash` 可手动关掉。
 
 **没有被沙箱挡住的**：覆盖工作目录里已有文件的内容（`echo > f`、`cp -f`、`sed -i`），所以非只读命令必须经你确认。只实现了 macOS；Linux 的 bwrap 没做也没测。
 

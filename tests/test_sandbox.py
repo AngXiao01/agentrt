@@ -83,3 +83,50 @@ def test_assistant_gets_bash_only_with_sandbox(tmp_path, monkeypatch):
     assert "bash" not in mk().tools                                                   # 没有沙箱：失败即关闭
     monkeypatch.setattr(sandbox, "available", lambda: True)
     assert "bash" in mk().tools
+
+
+# ---------------------------------------------------------------- 只读：解析决定问不问，内核决定能不能写
+
+@pytest.mark.parametrize("cmd,ro", [
+    ("uniq a.txt b.txt", False), ("uniq a.txt", True), ("uniq -c -f 2 a.txt", True),   # 第二个文件名是输出文件
+    ("sort -ox f", False), ("sort -rox f", False), ("sort --output=x f", False), ("sort -rn a", True),
+    ("file -C -m m", False), ("file a.txt", True),                                    # -C 会写 magic 文件
+    ("date -s 1200", False), ("date", True),
+    ("tar -tf a.tar --checkpoint=1 --checkpoint-action=exec=sh", False), ("tar -tvf a.tar", True),
+])
+def test_read_only_classifier_write_traps(cmd, ro):
+    assert sandbox.is_read_only_command(cmd) is ro
+
+
+def test_read_only_profile_writes_nowhere_but_its_own_tmp(tmp_path):
+    ws, tmp = tmp_path / "ws", tmp_path / "ws" / ".agentrt" / "tmp"
+    full, ro = sandbox.profile(ws), sandbox.profile(ws, read_only=True, tmp=tmp)
+    ws_rule = f'(subpath "{ws.resolve()}")'
+    assert "(deny file-write*)" in ro and "(deny network*)" in ro
+    assert f"(allow file-write* {ws_rule}" in full                       # 普通命令：工作目录可写
+    assert f"(allow file-write* {ws_rule}" not in ro                     # 只读命令：工作目录不可写
+    assert f'(subpath "{tmp.resolve()}")' in ro and "/private/tmp" not in ro.split("(deny file-write*)")[1]
+
+
+def test_sandboxed_bash_picks_the_read_only_profile(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(sandbox, "argv", lambda cmd, ws, read_only=False, tmp=None:
+                        seen.append(read_only) or ["/bin/sh", "-c", cmd])
+    bash, ctx = SandboxedBash(), ToolContext(tmp_path)
+    bash.run({"command": "ls"}, ctx)
+    bash.run({"command": "touch x"}, ctx)
+    assert seen == [True, False]
+
+
+@needs_sandbox
+def test_kernel_blocks_writes_even_if_the_classifier_were_wrong(sbx):
+    import subprocess
+    bash, ctx, _ = sbx
+    (ctx.workspace / "b.txt").write_text("KEEP")
+    tmp = ctx.workspace / ".agentrt" / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    for cmd in ("uniq a.txt b.txt", "sort -ob.txt a.txt", "echo x > c.txt"):   # 假设这些被误判成只读
+        subprocess.run(sandbox.argv(cmd, ctx.workspace, read_only=True, tmp=tmp), cwd=ctx.workspace,
+                       capture_output=True, text=True)
+    assert (ctx.workspace / "b.txt").read_text() == "KEEP" and not (ctx.workspace / "c.txt").exists()
+    assert "hello" in bash.run({"command": "cat a.txt | sort | uniq"}, ctx)     # 正常的只读命令照常能跑
