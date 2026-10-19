@@ -101,6 +101,7 @@ class Agent:
         self.volatile_prefix = volatile_prefix  # 仅用于对照实验：每轮在前缀里塞时间戳
         self.on_event = on_event
         self.native = bool(getattr(llm, "native_tools", False))
+        self._extra_prompt = extra_prompt
         self.system = build_system_prompt(list(self.tools.values()), self.native, extra_prompt)
         self._schemas = [t.schema() for t in self.tools.values()]
         self._serial = 0          # 全会话的模型调用序号，用来生成不重复的 call id
@@ -184,7 +185,7 @@ class Agent:
             for c in pending:
                 call = ToolCall(c["id"], c["name"], c.get("arguments") or {})
                 tool = self.tools.get(call.name)
-                if c["id"] in st.started and not (tool and tool.read_only):
+                if c["id"] in st.started and not (tool and tool.is_read_only(c.get("arguments") or {})):
                     messages.append(self._tool_result(call, INTERRUPTED, error=True))
                 else:
                     messages.append(self._execute(call))
@@ -253,9 +254,15 @@ class Agent:
             if note:
                 messages.append(self._user_note(note))
 
+    def add_tool(self, tool: Tool) -> None:
+        """追加工具（delegate 需要父 agent 才能构造）。system prompt 和 schema 随之重建，须在会话开始前调用。"""
+        self.tools[tool.name] = tool
+        self.system = build_system_prompt(list(self.tools.values()), self.native, self._extra_prompt)
+        self._schemas = [t.schema() for t in self.tools.values()]
+
     def _is_parallel_safe(self, call: ToolCall) -> bool:
         t = self.tools.get(call.name)
-        return bool(t and t.read_only and isinstance(call.arguments, dict))
+        return bool(t and isinstance(call.arguments, dict) and t.is_read_only(call.arguments))
 
     def _batches(self, calls: list[ToolCall]) -> list[list[ToolCall]]:
         """对应源码 toolOrchestration.partitionToolCalls：连续的并发安全（只读）调用合成一批并行，其余各自串行。"""
@@ -322,6 +329,7 @@ class Agent:
         dt = time.time() - t0
         u = res.usage or {}
         cached = int(((u.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
+        self.cm.note_usage(len(send), int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0))
         r = self.result
         r.llm_calls += 1
         r.llm_seconds += dt
@@ -362,7 +370,7 @@ class Agent:
                                            f"由用户决定。", decision=d)
 
         self._emit({"type": "tool_start", "call_id": call.id, "name": call.name, "arguments": call.arguments,
-                    "read_only": tool.read_only, "decision": d.source})
+                    "read_only": tool.is_read_only(call.arguments), "decision": d.source})
         t0 = time.time()
         error = False
         try:

@@ -160,16 +160,17 @@ class PermissionEngine:
 
         if self.mode == "bypass":
             return Decision("allow", "bypass 模式", "mode")
+        ro = tool.is_read_only(args)
         if self.mode == "plan":
-            if tool.read_only:
+            if ro:
                 return Decision("allow", "plan 模式只读工具", "mode")
             return Decision("deny", "plan 模式下禁止写操作和命令执行", "mode")
         if self.mode == "auto":
-            if tool.risk == "high":
+            if tool.risk == "high" and not ro:
                 return Decision("ask", "auto 模式下高风险工具需要确认", "mode")
             return Decision("allow", "auto 模式", "mode")
         # default
-        if tool.read_only:
+        if ro:
             return Decision("allow", "只读工具", "mode")
         return Decision("ask", "写操作需要确认", "mode")
 

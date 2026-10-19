@@ -88,6 +88,10 @@ def timeline(events: list[dict]) -> str:
         elif typ == "permission":
             who = "已批准" if e.get("approved") else "已拒绝"
             lines.append(f"{t}  ? {e['name']} 需要确认（{_short(e.get('reason'), 40)}）→ {who}，等待 {e.get('wait_seconds')}s")
+        elif typ == "subagent_start":
+            lines.append(f"{t}  ⤷ 子 agent #{e['n']} 开始：{_short(e.get('task'), 60)}  (日志 {e.get('log')})")
+        elif typ == "subagent_end":
+            lines.append(f"{t}  ⤶ 子 agent #{e['n']} 结束 {e.get('status')}，{e.get('tool_calls')} 次工具，{e.get('tokens')} tokens")
         elif typ == "turn_start":
             lines.append(f"{t}  ── 新一轮：{_short(e.get('text', ''), 60)}")
         elif typ == "compact":

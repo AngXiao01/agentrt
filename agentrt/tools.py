@@ -41,6 +41,10 @@ class Tool:
     read_only = True
     risk = "low"  # low / medium / high
 
+    def is_read_only(self, args: dict) -> bool:
+        """按本次调用的参数判断是否只读（对应源码 isReadOnly(input)）；默认取类属性。bash 靠它区分 ls 和 mv。"""
+        return self.read_only
+
     def subject(self, args: dict) -> str:
         """权限规则匹配用的主体字符串，例如 bash 的命令、文件工具的路径。"""
         return str(args.get("path", ""))
@@ -193,6 +197,36 @@ class Bash(Tool):
             out, _ = proc.communicate()
             return f"[超时 {timeout}s，已终止]\n{out or ''}"
         return f"[exit {proc.returncode}]\n{out or ''}"
+
+
+class SandboxedBash(Bash):
+    """在 sandbox-exec 里执行（见 sandbox.py）：不能联网、只能写工作目录、不能删除 / 重命名、读不到主目录里的密钥。
+    只读命令（ls / du / find 不带 -exec 等）自动放行，其余要确认。"""
+    description = ("在沙箱里执行 shell 命令（工作目录内）：用于解压、压缩、校验和、复杂统计等专用工具做不到的事。"
+                   "不能联网；不能删除或重命名（删除用 trash，重命名用 move_file）；读不到工作目录之外的用户文件。")
+
+    def is_read_only(self, args):
+        from .sandbox import is_read_only_command
+        return is_read_only_command(str(args.get("command", "")))
+
+    def run(self, args, ctx):
+        from . import sandbox
+        timeout = min(float(args.get("timeout", ctx.bash_timeout)), 300)
+        tmp = ctx.workspace / ".agentrt" / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(ctx.workspace), "LANG": "C.UTF-8",
+               "TMPDIR": str(tmp), "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(sandbox.argv(str(args["command"]), ctx.workspace), cwd=ctx.workspace, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, _ = proc.communicate()
+            return f"[超时 {timeout}s，已终止]\n{out or ''}"
+        note = "\n[提示：Operation not permitted 来自沙箱——不能联网 / 删除 / 重命名 / 读写工作目录之外]" \
+            if "Operation not permitted" in (out or "") else ""
+        return f"[exit {proc.returncode}]\n{out or ''}{note}"
 
 
 class TodoWrite(Tool):

@@ -79,7 +79,11 @@ def _session_path(ref: str, sessions_dir: Path) -> Path:
 
 
 def _agent(a, llm, log: EventLog, workspace) -> Agent:
-    return Agent(llm, workspace, log,
+    tools = None
+    if getattr(a, "mcp_config", None):
+        from .tools import default_tools
+        tools = default_tools() + _mcp_tools(a)
+    return Agent(llm, workspace, log, tools=tools,
                  permissions=PermissionEngine(a.mode, allow=a.allow, deny=a.deny, ask=a.ask),
                  approver=APPROVERS[a.approve],
                  context=ContextManager(llm, max_context_tokens=llm.context_budget(a.max_context),
@@ -117,6 +121,18 @@ def cmd_run(a) -> None:
     _report(res, log)
 
 
+def _mcp_tools(a):
+    """--mcp-config 指向 {"mcpServers": ...} 格式的文件（如 ~/.claude.json）；--mcp-only 选要接的 server。"""
+    if not getattr(a, "mcp_config", None):
+        return []
+    from .mcp import load_mcp_tools
+    tools, clients, warns = load_mcp_tools(a.mcp_config, a.mcp_only.split(",") if a.mcp_only else None)
+    for w in warns:
+        print(f"[mcp] {w}", file=sys.stderr)
+    print(f"[mcp] 已接入 {len(clients)} 个 server，{len(tools)} 个工具", file=sys.stderr)
+    return tools
+
+
 def cmd_assistant(a) -> None:
     from .assistant import build_assistant, repl
     from .openrouter import OpenRouterLLM
@@ -127,7 +143,8 @@ def cmd_assistant(a) -> None:
     agent = build_assistant(llm, ws, log, permissions=PermissionEngine(a.mode, allow=a.allow, deny=a.deny, ask=a.ask),
                             approver=APPROVERS[a.approve],
                             context=ContextManager(llm, max_context_tokens=a.max_context, enabled=not a.no_compact),
-                            on_event=_printer(a.verbose), max_turns=a.max_turns, bash_timeout=a.bash_timeout)
+                            on_event=_printer(a.verbose), max_turns=a.max_turns, bash_timeout=a.bash_timeout,
+                            bash=not a.no_bash)
     if a.once:
         res = agent.send(a.once)
         _report(res, log)
@@ -142,7 +159,7 @@ def cmd_web(a) -> None:
     llm = OpenRouterLLM(a.model, temperature=a.temperature, max_tokens=a.max_tokens, max_retries=a.retries)
     resume = _session_path(a.resume, a.sessions_dir) if a.resume else None
     serve(llm, Path(a.workspace).expanduser().resolve(), a.mode, a.sessions_dir, port=a.port,
-          open_browser=not a.no_open, resume=resume)
+          open_browser=not a.no_open, resume=resume, bash=not a.no_bash)
 
 
 def cmd_resume(a) -> None:
@@ -176,7 +193,7 @@ def cmd_trace(a) -> None:
 
 
 def cmd_sessions(a) -> None:
-    files = sorted(Path(a.sessions_dir).glob("*.jsonl"))[-a.n:]
+    files = [f for f in sorted(Path(a.sessions_dir).glob("*.jsonl")) if ".sub" not in f.stem][-a.n:]
     for f in files:
         s = summarize(load(f))
         print(f"{f.stem}  {s['status']:<10} {s['llm_calls']:>3} 轮  {s['wall_seconds']:>7}s  {s['task'][:60]}")
@@ -195,6 +212,10 @@ def main(argv=None) -> None:
         sp.add_argument("--temperature", type=float, default=0.2)
         sp.add_argument("--max-tokens", type=int, default=2048)
         sp.add_argument("--retries", type=int, default=4, help="网络错误重试次数")
+
+    def mcp_opts(sp):
+        sp.add_argument("--mcp-config", help="MCP 配置文件（含 mcpServers，如 ~/.claude.json），默认不接 MCP")
+        sp.add_argument("--mcp-only", help="只接这几个 server，逗号分隔")
 
     def agent_opts(sp):
         sp.add_argument("--mode", choices=MODES, default="default")
@@ -218,6 +239,7 @@ def main(argv=None) -> None:
     sp.add_argument("task")
     sp.add_argument("--workspace", default=".")
     llm_opts(sp)
+    mcp_opts(sp)
     agent_opts(sp)
     sp.set_defaults(fn=cmd_run)
 
@@ -229,6 +251,7 @@ def main(argv=None) -> None:
     sp.add_argument("--temperature", type=float, default=0.2)
     sp.add_argument("--max-tokens", type=int, default=2048)
     sp.add_argument("--retries", type=int, default=3)
+    sp.add_argument("--no-bash", action="store_true", help="不给助手 bash（默认有沙箱时提供）")
     agent_opts(sp)
     sp.set_defaults(fn=cmd_assistant)
 
@@ -242,6 +265,7 @@ def main(argv=None) -> None:
     sp.add_argument("--temperature", type=float, default=0.2)
     sp.add_argument("--max-tokens", type=int, default=2048)
     sp.add_argument("--retries", type=int, default=3)
+    sp.add_argument("--no-bash", action="store_true")
     sp.set_defaults(fn=cmd_web)
 
     sp = sub.add_parser("resume", help="从会话日志断点继续")

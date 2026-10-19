@@ -25,8 +25,9 @@ APPROVE_TIMEOUT = 600
 
 
 class WebSession:
-    def __init__(self, llm, workspace: Path, mode: str, sessions_dir: Path, resume: Optional[Path] = None):
-        self.llm, self.sessions_dir = llm, sessions_dir
+    def __init__(self, llm, workspace: Path, mode: str, sessions_dir: Path, resume: Optional[Path] = None,
+                 extra_tools=None, bash: bool = True):
+        self.llm, self.sessions_dir, self.extra_tools, self.bash = llm, sessions_dir, extra_tools, bash
         self.events: list[dict] = []
         self.cv = threading.Condition()
         self.pending: dict[str, dict] = {}
@@ -55,7 +56,7 @@ class WebSession:
         self.agent = build_assistant(
             self.llm, workspace, log, permissions=PermissionEngine(mode), approver=self._approve,
             context=ContextManager(self.llm, max_context_tokens=60000), on_event=self._on_agent_event,
-            max_turns=40)
+            max_turns=40, extra_tools=self.extra_tools, bash=self.bash)
 
     def resume_from(self, path: Path, mode: str) -> None:
         """从事件日志恢复：重建上下文、把历史回放到页面；上一轮没做完就接着做（副作用至多一次的语义见 session.py）。"""
@@ -276,8 +277,8 @@ def make_handler(sess: WebSession, token: str, port: int):
 
 
 def serve(llm, workspace: Path, mode: str, sessions_dir: Path, port: int = 8765, open_browser: bool = True,
-          resume: Optional[Path] = None) -> None:
-    sess = WebSession(llm, workspace, mode, sessions_dir, resume)
+          resume: Optional[Path] = None, extra_tools=None, bash: bool = True) -> None:
+    sess = WebSession(llm, workspace, mode, sessions_dir, resume, extra_tools, bash)
     token = secrets.token_urlsafe(16)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sess, token, port))
     httpd.daemon_threads = True

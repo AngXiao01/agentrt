@@ -10,7 +10,9 @@ from typing import Callable
 
 from .loop import Agent
 from .fs_tools import CopyFile, FileStats, FindDuplicates, FindFiles, MoveFile, Trash
-from .tools import Grep, ListDir, ReadFile
+from . import sandbox
+from .subagent import Delegate
+from .tools import Grep, ListDir, ReadFile, SandboxedBash
 
 ASSISTANT_PROMPT = """## 你的角色：电脑文件助手
 工作目录就是用户让你管理的范围。你负责帮用户查找、了解、整理其中的文件。
@@ -19,6 +21,8 @@ ASSISTANT_PROMPT = """## 你的角色：电脑文件助手
 - 整理文件（move_file / copy_file / make_dir / trash）之前，先用只读工具把现状查清楚，并在一句话里说明你打算做什么。
 - 没有永久删除：用户要求删除时，先用 find_files 列出将被删除的清单并向用户说明数量，再用 trash 的 paths 一次提交（可恢复）。重复文件只报告，不要自作主张删除，除非用户明确要求。
 - 批量操作先小范围试一个，确认没问题再继续；结束时列出实际改动了哪些文件。
+- bash 在沙箱里：不能联网、不能删除或重命名（删除用 trash，重命名用 move_file）、读不到工作目录之外。只在专用工具做不到时才用（解压、压缩、校验和、复杂统计等），能用 find_files / file_stats / grep 的不要用 bash。
+- 要翻很多文件才能回答的调查（比如“每个子目录大概放了什么”），可以用 delegate 交给子 agent，它只返回摘要，不占你的上下文；彼此独立的调查可以一次发出多个 delegate。
 - 回答里引用文件时写相对路径，大小用 KB/MB，方便用户核对。"""
 
 HELP = """/help 帮助   /clear 清空对话   /mode <plan|default|auto|bypass> 切换权限模式   /exit 退出
@@ -26,20 +30,25 @@ plan=只读  default=改动前确认  auto=只有删除（trash）确认  bypass
 示例：找出最近一周改过的 PDF / 哪些东西最占空间 / 把 Downloads 里的图片按月份归档 / 找重复文件"""
 
 
-def assistant_tools() -> list:
-    """文件助手只给 9 个工具：6 个只读（找、统计、看、查重）+ 3 个会改动文件（移动、复制、删除到废纸篓）。
+def assistant_tools() -> list:  # delegate 需要父 agent，在 build_assistant 里追加
+    """文件助手只给 9 个基础工具（+ delegate 子 agent，共 10 个）：6 个只读（找、统计、看、查重）+ 3 个会改动文件（移动、复制、删除到废纸篓）。
     没有 bash / write_file / edit_file：文件管理用不着，工具少，模型选错的机会也少，权限面也小
     （Claude Code 的核心工具也是少量职责单一的工具：Glob / Grep / Read / Edit / Write / Bash）。"""
     return [ListDir(), FindFiles(), FileStats(), Grep(), ReadFile(), FindDuplicates(), MoveFile(), CopyFile(), Trash()]
 
 
 def build_assistant(llm, workspace, log, *, permissions, approver, context, on_event,
-                    max_turns=40, bash_timeout=30.0) -> Agent:
-    tools = assistant_tools()
-    return Agent(llm, workspace, log, tools=tools, permissions=permissions, approver=approver,
+                    max_turns=40, bash_timeout=30.0, extra_tools=None, delegate=True, bash=True) -> Agent:
+    tools = assistant_tools() + list(extra_tools or [])
+    if bash and sandbox.available():   # 没有沙箱就不给 bash（失败即关闭）
+        tools.append(SandboxedBash())
+    agent = Agent(llm, workspace, log, tools=tools, permissions=permissions, approver=approver,
                  context=context, max_turns=max_turns, bash_timeout=bash_timeout,
-                 on_event=on_event,
-                 extra_prompt=ASSISTANT_PROMPT + f"\n- 今天是 {time.strftime('%Y-%m-%d')}，用户说的“最近一周”“上个月”等相对时间据此换算。")
+                  on_event=on_event,
+                  extra_prompt=ASSISTANT_PROMPT + f"\n- 今天是 {time.strftime('%Y-%m-%d')}，用户说的“最近一周”“上个月”等相对时间据此换算。")
+    if delegate:
+        agent.add_tool(Delegate(agent))
+    return agent
 
 
 class Spinner:

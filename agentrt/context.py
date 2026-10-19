@@ -70,6 +70,8 @@ SUMMARY_PROMPT = (
 
 
 class ContextManager:
+    # 计数方式对照源码 utils/tokens.ts 的 tokenCountWithEstimation：Claude Code 自己也不跑 tokenizer，
+    # 而是 “上一次 API 返回的 usage + 其后新增消息的粗估（字符数 / 4）”。服务端数的才是准的，也不依赖第三方库。
     def __init__(self, llm, max_context_tokens: int = 24000, compact_ratio: Optional[float] = None,
                  keep_recent: int = 6, tool_result_max_chars: int = 6000, enabled: bool = True,
                  mc_keep_recent: int = 5):
@@ -82,6 +84,17 @@ class ContextManager:
         self.tool_result_max_chars = tool_result_max_chars
         self.enabled = enabled
         self.compactions = 0
+        self._anchor: Optional[tuple[int, int]] = None   # (到这条为止的消息数, 此时服务端报告的上下文 tokens)
+
+    def note_usage(self, n_messages_sent: int, prompt_tokens: int, completion_tokens: int) -> None:
+        """记下一次模型调用的真实用量：发出 n 条消息，返回后上下文 = prompt + completion，对应前 n+1 条消息。"""
+        if prompt_tokens:
+            self._anchor = (n_messages_sent + 1, prompt_tokens + completion_tokens)
+
+    def count(self, messages: list[dict]) -> int:
+        if self._anchor and len(messages) >= self._anchor[0]:
+            return self._anchor[1] + estimate_tokens(messages[self._anchor[0]:])
+        return estimate_tokens(messages)
 
     def _safe_boundary(self, messages: list[dict], keep: int) -> int:
         """找切分点：保留区不能以 tool 结果开头，否则会和它的 assistant 调用分离。"""
@@ -115,6 +128,7 @@ class ContextManager:
             return None
         summary = self._summarize(old)
         self.compactions += 1
+        self._anchor = None
         note = {"role": "user", "content": f"[上下文已压缩（{reason}），以下是此前工作的摘要]\n{summary}"}
         return [messages[0], note] + recent
 
@@ -126,9 +140,11 @@ class ContextManager:
 
     def maybe_autocompact(self, messages: list[dict]) -> Optional[tuple[list[dict], str]]:
         """返回 (新消息, 原因) 或 None。先试 microcompact（不调模型）；还超阈值才让模型做摘要。"""
-        if not self.enabled or estimate_tokens(messages) < self.threshold:
+        if not self.enabled or self.count(messages) < self.threshold:
             return None
         cleared, n = clear_old_results(messages, self.mc_keep_recent)
+        if n:
+            self._anchor = None   # 历史被改写，旧的用量锚点作废，回到粗估
         if n and estimate_tokens(cleared) < self.threshold:
             return cleared, "microcompact"
         summarized = self.compact(cleared, self.keep_recent, "autocompact")
