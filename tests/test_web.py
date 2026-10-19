@@ -1,0 +1,93 @@
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+from agentrt.llm import ScriptedLLM
+from agentrt.web import WebSession, make_handler
+from http.server import ThreadingHTTPServer
+
+
+@pytest.fixture
+def server(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.log").write_text("x")
+    llm = ScriptedLLM(['<tool_call>{"name":"trash","arguments":{"paths":["a.log"]}}</tool_call>', "删好了"])
+    sess = WebSession(llm, ws, "default", tmp_path / "s")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
+    port = httpd.server_address[1]
+    httpd.RequestHandlerClass = make_handler(sess, "tok", port)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield sess, port, ws
+    httpd.shutdown()
+
+
+def call(port, path, body=None, tok="tok"):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}?t={tok}", method="POST" if body is not None else "GET",
+                                 data=json.dumps(body).encode() if body is not None else None)
+    return json.loads(urllib.request.urlopen(req).read())
+
+
+def wait_for(sess, kind, timeout=5):
+    end = time.time() + timeout
+    while time.time() < end:
+        for e in list(sess.events):
+            if e["kind"] == kind:
+                return e
+        time.sleep(0.02)
+    raise AssertionError(f"没等到 {kind}: {[e['kind'] for e in sess.events]}")
+
+
+def test_token_required(server):
+    _, port, _ = server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        call(port, "/api/state", tok="wrong")
+    assert e.value.code == 403
+
+
+def test_trash_requires_approval_then_runs(server):
+    sess, port, ws = server
+    call(port, "/api/chat", {"text": "删掉 a.log"})
+    ap = wait_for(sess, "approval")
+    assert ap["tool"] == "trash" and (ws / "a.log").exists()          # 还没批准，文件还在
+    call(port, "/api/approve", {"id": ap["id"], "ok": True})
+    assert wait_for(sess, "final")["text"] == "删好了"
+    import os
+    from pathlib import Path
+    assert not (ws / "a.log").exists() and (Path(os.environ["AGENTRT_TRASH_DIR"]) / "a.log").exists()
+
+
+def test_denied_keeps_file(server):
+    sess, port, ws = server
+    call(port, "/api/chat", {"text": "删掉 a.log"})
+    ap = wait_for(sess, "approval")
+    call(port, "/api/approve", {"id": ap["id"], "ok": False})
+    wait_for(sess, "final")
+    assert (ws / "a.log").exists()
+    assert any(e["kind"] == "result" and e["denied"] for e in sess.events)
+
+
+def test_config_rejects_missing_dir(server):
+    _, port, _ = server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        call(port, "/api/config", {"workspace": "/no/such/dir", "mode": "default"})
+    assert e.value.code == 400
+
+
+def test_web_resume_replays_history(tmp_path):
+    from agentrt.session import EventLog
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    log = EventLog.new(tmp_path / "s")
+    s1 = WebSession(ScriptedLLM(["第一轮答复"]), ws, "default", tmp_path / "s")
+    s1.agent.log = log
+    s1.agent._chat_started = False
+    s1.agent.send("你好")
+    s2 = WebSession(ScriptedLLM([]), ws, "default", tmp_path / "s2", resume=log.path)
+    kinds = [e["kind"] for e in s2.events]
+    assert "user" in kinds and "final" in kinds and not s2.busy
+    assert next(e for e in s2.events if e["kind"] == "final")["text"] == "第一轮答复"
