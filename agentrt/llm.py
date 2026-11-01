@@ -44,6 +44,34 @@ class ChatResult:
     parse_errors: list[str] = field(default_factory=list)
     usage: dict = field(default_factory=dict)
     finish_reason: str = ""
+    reasoning: str = ""                       # reasoning_content / reasoning / <think>…</think>
+    reasoning_details: Optional[list] = None  # OpenRouter 的结构化 reasoning，回传时原样带回
+
+
+# ---------------------------------------------------------------- 用量归一
+
+def normalize_usage(u: Optional[dict]) -> dict:
+    """各家 usage 字段不一样，统一成 prompt / completion / cached / reasoning。
+    - OpenAI / vLLM：prompt_tokens_details.cached_tokens（vLLM 要开 --enable-prompt-tokens-details）
+    - DeepSeek：prompt_cache_hit_tokens / prompt_cache_miss_tokens（没有 prompt_tokens_details，只看前者会一直是 0）
+    - reasoning：completion_tokens_details.reasoning_tokens（包含在 completion_tokens 里）"""
+    u = u or {}
+    cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0
+    return {"prompt": int(u.get("prompt_tokens") or 0), "completion": int(u.get("completion_tokens") or 0),
+            "cached": int(cached), "reasoning": int((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)}
+
+
+_THINK_RE = re.compile(r"^\s*(?:<think>)?(.*?)</think>\s*", re.S)
+
+
+def split_think(content: str) -> tuple[str, str]:
+    """没开 reasoning parser 的 vLLM 会把思考留在正文里（<think>…</think>）：拆出来，不然会污染工具调用解析和最终答复。"""
+    if "</think>" not in (content or ""):
+        return content or "", ""
+    m = _THINK_RE.match(content)
+    if not m:
+        return content, ""
+    return content[m.end():], m.group(1).strip()
 
 
 # ---------------------------------------------------------------- 文本协议解析
@@ -80,15 +108,40 @@ def parse_text_tool_calls(text: str, id_prefix: str) -> tuple[list[ToolCall], li
 
 # ---------------------------------------------------------------- 发给服务端前的消息整形
 
-def to_wire(messages: list[dict], native_tools: bool, merge_system: bool) -> list[dict]:
+REASONING_REPLAY = ("none", "turn", "all")
+
+
+def reasoning_keep_from(messages: list[dict], policy: str) -> int:
+    """从哪条消息开始回传 reasoning。
+
+    - none：都不回传（大多数 harness 的默认做法）。
+    - turn：只回传“最后一条真正的用户消息”之后的 assistant reasoning，也就是当前这一轮工具调用链里的思考。
+      这是 DeepSeek V3.2 起 thinking-in-tool-use 的规则（同一轮内必须带回，新一轮丢掉），Qwen3 的 chat template
+      也是这样渲染的。harness 自己插的提示（kind=harness）和压缩摘要不算新一轮。
+    - all：全部回传（Kimi K2 Thinking / MiniMax M2 这类 interleaved thinking 模型建议保留全部历史思考）。
+    """
+    if policy == "all":
+        return 0
+    if policy != "turn":
+        return len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m["role"] == "user" and m.get("kind") not in ("harness", "summary"):
+            return i
+    return 0
+
+
+def to_wire(messages: list[dict], native_tools: bool, merge_system: bool, reasoning_replay: str = "turn") -> list[dict]:
     """内部消息 -> 接口消息。
 
     - text 协议下，role=tool 的结果转成 user 消息（带 <tool_result> 标签）。
     - 连续同角色消息合并：Gemma 一类模板要求 user/assistant 严格交替。
     - merge_system=True 时把 system 并进第一条 user（部分模板不支持 system 角色）。
+    - reasoning 按 reasoning_replay 策略放进 assistant 消息的 reasoning_content 字段（DeepSeek / vLLM 模板认这个字段）。
     """
     out: list[dict] = []
-    for m in messages:
+    keep_from = reasoning_keep_from(messages, reasoning_replay)
+    for idx, m in enumerate(messages):
         role = m["role"]
         if role == "tool" and not native_tools:
             content = (f'<tool_result id="{m["tool_call_id"]}" name="{m.get("name", "")}">\n'
@@ -104,6 +157,10 @@ def to_wire(messages: list[dict], native_tools: bool, merge_system: bool) -> lis
             wm = {"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"]}
         else:
             wm = {"role": role, "content": m.get("content") or ""}
+        if role == "assistant" and idx >= keep_from and m.get("reasoning"):
+            wm["reasoning_content"] = m["reasoning"]
+            if m.get("reasoning_details"):
+                wm["reasoning_details"] = m["reasoning_details"]
         if (out and wm["role"] == out[-1]["role"] and wm["role"] in ("user", "assistant")
                 and "tool_calls" not in wm and "tool_calls" not in out[-1]):
             out[-1] = {**out[-1], "content": out[-1]["content"] + "\n\n" + wm["content"]}
@@ -124,7 +181,8 @@ class OpenAICompatLLM:
     def __init__(self, base_url: str, model: Optional[str] = None, api_key: str = "EMPTY",
                  timeout: float = 180, max_retries: int = 4, native_tools: bool = False,
                  merge_system: bool = False, temperature: float = 0.2, max_tokens: int = 2048,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, reasoning_replay: str = "turn",
+                 extra_body: Optional[dict] = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -134,6 +192,10 @@ class OpenAICompatLLM:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._sleep = sleep
+        if reasoning_replay not in REASONING_REPLAY:
+            raise ValueError(f"reasoning_replay 必须是 {REASONING_REPLAY}")
+        self.reasoning_replay = reasoning_replay
+        self.extra_body = dict(extra_body or {})   # 例如 {"thinking": {"type": "enabled"}}、{"chat_template_kwargs": {...}}
         self.max_model_len: Optional[int] = None
         self.model = self._resolve_model(model)
 
@@ -185,10 +247,19 @@ class OpenAICompatLLM:
             return requested
         return max(1024, min(requested, self.max_model_len - self.max_tokens - margin))
 
+    def wire(self, messages: list[dict]) -> list[dict]:
+        """这次请求真正发出去的消息（主循环据此判断前缀有没有被改写，见 loop._chat）。"""
+        return to_wire(messages, self.native_tools, self.merge_system, self.reasoning_replay)
+
+    def params(self) -> dict:
+        return {"model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens,
+                "native_tools": self.native_tools, "merge_system": self.merge_system,
+                "reasoning_replay": self.reasoning_replay, "extra_body": self.extra_body}
+
     def chat(self, messages: list[dict], tools_schema: Optional[list[dict]] = None,
              call_prefix: str = "c") -> ChatResult:
         payload = {"model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens,
-                   "messages": to_wire(messages, self.native_tools, self.merge_system)}
+                   **self.extra_body, "messages": self.wire(messages)}
         if self.native_tools and tools_schema:
             payload["tools"] = tools_schema
             payload["tool_choice"] = "auto"
@@ -197,7 +268,8 @@ class OpenAICompatLLM:
         data = self._with_retry(lambda: self._request("POST", "/chat/completions", payload))
         choice = data["choices"][0]
         msg = choice.get("message", {})
-        content = msg.get("content") or ""
+        content, think = split_think(msg.get("content") or "")
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or think
         usage = data.get("usage", {}) or {}
         if self.native_tools:
             calls, errors = [], []
@@ -215,29 +287,37 @@ class OpenAICompatLLM:
         else:
             calls, errors = parse_text_tool_calls(content, call_prefix)
         return ChatResult(content=content, tool_calls=calls, parse_errors=errors, usage=usage,
-                          finish_reason=choice.get("finish_reason") or "")
+                          finish_reason=choice.get("finish_reason") or "", reasoning=reasoning or "",
+                          reasoning_details=msg.get("reasoning_details") or None)
 
 
 # ---------------------------------------------------------------- 测试用脚本化模型
 
 class ScriptedLLM:
-    """按顺序返回预设回复。每一步可以是字符串、异常实例，或 callable(messages)->str。"""
+    """按顺序返回预设回复。每一步可以是字符串、{"content", "reasoning"}、异常实例，或 callable(messages)->上述之一。"""
 
-    def __init__(self, steps: list, native_tools: bool = False):
+    def __init__(self, steps: list, native_tools: bool = False, reasoning_replay: str = "turn"):
         self.steps = list(steps)
         self.calls: list[list[dict]] = []
+        self.wires: list[list[dict]] = []
         self.native_tools = native_tools
+        self.reasoning_replay = reasoning_replay
         self.model = "scripted"
+
+    def wire(self, messages):
+        return to_wire(messages, self.native_tools, False, self.reasoning_replay)
 
     def chat(self, messages, tools_schema=None, call_prefix: str = "c") -> ChatResult:
         self.calls.append([dict(m) for m in messages])
+        self.wires.append(self.wire(messages))
         if not self.steps:
             return ChatResult(content="（脚本已结束）")
         step = self.steps.pop(0)
         if isinstance(step, Exception):
             raise step
-        text = step(messages) if callable(step) else step
+        step = step(messages) if callable(step) else step
+        text, reasoning = (step.get("content", ""), step.get("reasoning", "")) if isinstance(step, dict) else (step, "")
         calls, errors = parse_text_tool_calls(text, call_prefix)
-        return ChatResult(content=text, tool_calls=calls, parse_errors=errors,
+        return ChatResult(content=text, tool_calls=calls, parse_errors=errors, reasoning=reasoning,
                           usage={"prompt_tokens": sum(len(m.get("content") or "") for m in messages) // 4,
                                  "completion_tokens": len(text) // 4})

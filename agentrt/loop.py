@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,8 +21,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .context import ContextManager, estimate_tokens, truncate_middle
-from .llm import ContextLengthError, LLMError, ToolCall
+from .llm import ContextLengthError, LLMError, ToolCall, normalize_usage, to_wire
 from .permissions import Decision, PermissionEngine, deny_all_approver
+from .sandboxes import SandboxLost
 from .session import EventLog, ReplayState
 from .tools import Tool, ToolContext, ToolError, default_tools, describe_tools_for_prompt
 
@@ -44,14 +46,19 @@ RULES = """## 规则
 7. 最终答复用中文，简短说明做了什么、结果是什么。"""
 
 
-def build_system_prompt(tools: list[Tool], native_tools: bool, extra: str = "") -> str:
+INTRO = "你是一个在本地工作目录里完成任务的 agent。"
+
+
+def build_system_prompt(tools: list[Tool], native_tools: bool, extra: str = "", intro: str = INTRO,
+                        rules: str = RULES, text_protocol: str = TEXT_PROTOCOL,
+                        native_protocol: str = NATIVE_PROTOCOL) -> str:
     """system prompt 在整个会话里保持不变：不放时间戳，不随权限模式增删工具（KV cache 友好）。"""
-    parts = ["你是一个在本地工作目录里完成任务的 agent。"]
+    parts = [intro]
     if native_tools:
-        parts.append(NATIVE_PROTOCOL)
+        parts.append(native_protocol)
     else:
-        parts += [TEXT_PROTOCOL, "## 可用工具\n" + describe_tools_for_prompt(tools)]
-    parts.append(RULES)
+        parts += [text_protocol, "## 可用工具\n" + describe_tools_for_prompt(tools)]
+    parts.append(rules)
     if extra:
         parts.append(extra)
     return "\n\n".join(parts)
@@ -72,6 +79,10 @@ class RunResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    compact_tokens: int = 0     # 压缩时摘要调用花的 tokens（也算进 prompt/completion）
+    cache_breaks: int = 0       # 发出去的前缀和上一次请求不一致的次数（KV cache 失效，见 _chat）
+    cost_usd: float = 0.0       # 只有给了价格（price=）才算
     llm_seconds: float = 0.0
     tool_seconds: float = 0.0
     wall_seconds: float = 0.0
@@ -102,10 +113,18 @@ class Agent:
                  approver: Callable[[Tool, dict, Decision], bool] = deny_all_approver,
                  context: Optional[ContextManager] = None, max_turns: int = 30,
                  bash_timeout: float = 30.0, volatile_prefix: bool = False,
-                 on_event: Optional[Callable[[dict], None]] = None, extra_prompt: str = ""):
+                 on_event: Optional[Callable[[dict], None]] = None, extra_prompt: str = "",
+                 sandbox=None, prompt: Optional[dict] = None, price: Optional[dict] = None):
+        """sandbox：工具的执行环境（sandboxes.py），给 coding_tools 用；prompt：覆盖 system prompt 的各段
+        （intro / rules / text_protocol / native_protocol）；price：每百万 tokens 的美元价格 {"input", "cached", "output"}。"""
         self.llm = llm
-        self.ctx = ToolContext(Path(workspace).resolve(), bash_timeout=bash_timeout)
+        self.ctx = ToolContext(Path(workspace).resolve(), bash_timeout=bash_timeout, sandbox=sandbox)
         self.ctx.workspace.mkdir(parents=True, exist_ok=True)
+        self.sandbox = sandbox
+        self.price = price
+        self._prompt = dict(prompt or {})
+        if sandbox is not None and getattr(sandbox, "on_provision", "absent") is None:
+            sandbox.on_provision = lambda info: self._emit({"type": "provision", **info})
         self.log = log
         self.tools = {t.name: t for t in (tools or default_tools())}
         self.perms = permissions or PermissionEngine()
@@ -116,8 +135,9 @@ class Agent:
         self.on_event = on_event
         self.native = bool(getattr(llm, "native_tools", False))
         self._extra_prompt = extra_prompt
-        self.system = build_system_prompt(list(self.tools.values()), self.native, extra_prompt)
+        self.system = build_system_prompt(list(self.tools.values()), self.native, extra_prompt, **self._prompt)
         self._schemas = [t.schema() for t in self.tools.values()]
+        self._sent: list[str] = []  # 上一次请求逐条消息的哈希：判断这次是不是在上次的基础上只追加
         self._serial = 0          # 全会话的模型调用序号，用来生成不重复的 call id
         self._recent_sigs: list[tuple] = []
         self._empty_nudged = False
@@ -145,10 +165,7 @@ class Agent:
         t0 = time.time()
         self.result = RunResult(session_id=self.log.session_id)
         self._cancel.clear()
-        self._emit({"type": "session_start", "task": task, "workspace": str(self.ctx.workspace),
-                    "model": getattr(self.llm, "model", ""), "mode": self.perms.mode,
-                    "native_tools": self.native, "max_turns": self.max_turns,
-                    "backend": getattr(self.llm, "backend", "vllm")})
+        self._emit(self._start_event(task))
         messages = [{"role": "system", "content": self.system}, {"role": "user", "content": task}]
         for m in messages:
             self._emit({"type": "message", "message": m})
@@ -160,10 +177,7 @@ class Agent:
         self.result = RunResult(session_id=self.log.session_id)
         if not self._chat_started:
             self._chat_started = True
-            self._emit({"type": "session_start", "task": text, "workspace": str(self.ctx.workspace),
-                        "model": getattr(self.llm, "model", ""), "mode": self.perms.mode,
-                        "native_tools": self.native, "max_turns": self.max_turns,
-                    "backend": getattr(self.llm, "backend", "vllm")})
+            self._emit(self._start_event(text))
             self._live = [{"role": "system", "content": self.system}]
             self._emit({"type": "message", "message": self._live[0]})
         self._cancel.clear()
@@ -173,6 +187,17 @@ class Agent:
         self._emit({"type": "message", "message": m})
         self._empty_nudged = False
         return self._drive(self._live, t0)
+
+    def _start_event(self, task: str) -> dict:
+        params = self.llm.params() if hasattr(self.llm, "params") else {}
+        return {"type": "session_start", "task": task, "workspace": str(self.ctx.workspace),
+                "model": getattr(self.llm, "model", ""), "mode": self.perms.mode,
+                "native_tools": self.native, "max_turns": self.max_turns,
+                "backend": getattr(self.llm, "backend", "vllm"), "llm_params": params,
+                "sandbox": {"kind": self.sandbox.kind, "workdir": self.sandbox.workdir,
+                            "enforcement": self.sandbox.enforcement, "disposable": self.sandbox.disposable}
+                if self.sandbox is not None else None,
+                "tools": sorted(self.tools)}
 
     def restore(self) -> bool:
         """接着已有日志继续多轮对话：重建上下文。返回上一轮是否被中断（没有 end 事件）。"""
@@ -276,8 +301,7 @@ class Agent:
             turns += 1
             r.turns = turns
 
-            asst = {"role": "assistant", "content": res.content,
-                    "tool_calls": [asdict(c) for c in res.tool_calls]}
+            asst = self._asst_message(res)
             if res.parse_errors:
                 asst["parse_errors"] = res.parse_errors
             messages.append(asst)
@@ -309,7 +333,7 @@ class Agent:
     def add_tool(self, tool: Tool) -> None:
         """追加工具（delegate 需要父 agent 才能构造）。system prompt 和 schema 随之重建，须在会话开始前调用。"""
         self.tools[tool.name] = tool
-        self.system = build_system_prompt(list(self.tools.values()), self.native, self._extra_prompt)
+        self.system = build_system_prompt(list(self.tools.values()), self.native, self._extra_prompt, **self._prompt)
         self._schemas = [t.schema() for t in self.tools.values()]
 
     def _is_parallel_safe(self, call: ToolCall) -> bool:
@@ -356,9 +380,20 @@ class Agent:
         return new
 
     def _record_compact(self, before: list[dict], after: list[dict], reason: str) -> None:
-        self.result.compactions += 1
+        r = self.result
+        r.compactions += 1
+        u = normalize_usage(getattr(self.cm, "last_summary_usage", None))
+        self.cm.last_summary_usage = None
+        if u["prompt"] or u["completion"]:   # 摘要也是一次模型调用：不记账的话，开了压缩的配置会显得更省
+            r.llm_calls += 1
+            r.prompt_tokens += u["prompt"]
+            r.completion_tokens += u["completion"]
+            r.cached_tokens += u["cached"]
+            r.compact_tokens += u["prompt"] + u["completion"]
+            r.cost_usd += self._cost(u)
         self._emit({"type": "compact", "reason": reason, "before_tokens": estimate_tokens(before),
-                    "after_tokens": estimate_tokens(after), "messages": after})
+                    "after_tokens": estimate_tokens(after), "messages": after,
+                    "summary_usage": u if (u["prompt"] or u["completion"]) else None})
 
     def _call_model(self, messages: list[dict]):
         try:
@@ -370,28 +405,75 @@ class Agent:
             self._record_compact(messages, new, "reactive")
             return self._chat(new), new  # 只重试一次，再超长就交给上层
 
+    @staticmethod
+    def _asst_message(res) -> dict:
+        asst = {"role": "assistant", "content": res.content, "tool_calls": [asdict(c) for c in res.tool_calls]}
+        if getattr(res, "reasoning", ""):
+            asst["reasoning"] = res.reasoning
+        if getattr(res, "reasoning_details", None):
+            asst["reasoning_details"] = res.reasoning_details
+        return asst
+
+    @staticmethod
+    def _hash(m: dict) -> str:
+        return hashlib.sha1(json.dumps(m, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+    def _cost(self, u: dict) -> float:
+        p = self.price
+        if not p:
+            return 0.0
+        fresh = max(0, u["prompt"] - u["cached"])
+        return (fresh * p.get("input", 0) + u["cached"] * p.get("cached", p.get("input", 0))
+                + u["completion"] * p.get("output", 0)) / 1e6
+
+    def _prefix_break(self, send: list[dict]) -> Optional[int]:
+        """这次真正发出去的消息，是不是“上一次请求 + 上一次模型生成的那条回复”再往后追加？
+        不是的话返回第一处不同的位置——服务端的 prefix cache 只能复用这之前的部分。
+        对应 DeepSeek Harness 的 request series：压缩、改 system prompt、跨轮丢弃 reasoning 都会开启新的 series。
+        不需要服务端支持就能离线量出来（_chat 返回后把生成的回复按“原样带 reasoning”的形式补进 _sent）。"""
+        wire = self.llm.wire(send) if hasattr(self.llm, "wire") else send
+        cur = [self._hash(m) for m in wire]
+        prev, self._sent = self._sent, cur
+        if not prev:
+            return None
+        for i, (a, b) in enumerate(zip(prev, cur)):
+            if a != b:
+                return i
+        return None if len(cur) >= len(prev) else len(cur)
+
     def _chat(self, messages: list[dict]):
         self._serial += 1
         send = messages
+        stamp = None
         if self.volatile_prefix:
             stamp = time.strftime("%Y-%m-%d %H:%M:%S") + f".{time.time_ns() % 10**6:06d}"
             send = [{**messages[0], "content": f"当前时间：{stamp}\n\n{messages[0]['content']}"}] + messages[1:]
+        brk = self._prefix_break(send)
         t0 = time.time()
         res = self.llm.chat(send, self._schemas if self.native else None, call_prefix=f"t{self._serial}")
         dt = time.time() - t0
-        u = res.usage or {}
-        cached = int(((u.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
-        self.cm.note_usage(len(send), int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0))
+        u = normalize_usage(res.usage)
+        self.cm.note_usage(len(send), u["prompt"], u["completion"])
         r = self.result
         r.llm_calls += 1
         r.llm_seconds += dt
-        r.prompt_tokens += int(u.get("prompt_tokens") or 0)
-        r.completion_tokens += int(u.get("completion_tokens") or 0)
-        r.cached_tokens += cached
-        self._emit({"type": "span", "kind": "llm", "serial": self._serial, "seconds": round(dt, 3),
-                    "prompt_tokens": u.get("prompt_tokens"), "completion_tokens": u.get("completion_tokens"),
-                    "cached_tokens": cached, "est_context_tokens": estimate_tokens(messages),
-                    "finish_reason": res.finish_reason, "n_calls": len(res.tool_calls)})
+        r.prompt_tokens += u["prompt"]
+        r.completion_tokens += u["completion"]
+        r.cached_tokens += u["cached"]
+        r.reasoning_tokens += u["reasoning"]
+        r.cost_usd += self._cost(u)
+        if brk is not None:
+            r.cache_breaks += 1
+        # 服务端缓存里的是“请求 + 生成的回复（含 reasoning）”：下一次请求应当以此为前缀
+        self._sent.append(self._hash(to_wire([self._asst_message(res)], self.native, False, "all")[0]))
+        span = {"type": "span", "kind": "llm", "serial": self._serial, "seconds": round(dt, 3),
+                "prompt_tokens": u["prompt"], "completion_tokens": u["completion"],
+                "cached_tokens": u["cached"], "reasoning_tokens": u["reasoning"],
+                "est_context_tokens": estimate_tokens(messages), "n_messages": len(send),
+                "prefix_break": brk, "finish_reason": res.finish_reason, "n_calls": len(res.tool_calls)}
+        if stamp:
+            span["volatile_stamp"] = stamp   # 模型看到的东西都要能从日志重建
+        self._emit(span)
         return res
 
     # ------------------------------------------------------------ 工具执行
@@ -430,6 +512,10 @@ class Agent:
             out = tool.run(call.arguments, self.ctx)
         except ToolError as e:
             out, error = f"[工具错误] {e}", True
+        except SandboxLost as e:   # Managed Agents：容器当 cattle，失败作为工具错误交给模型，下一次调用重新 provision
+            out, error = (f"[执行环境丢失] {e}。下一次调用会换一个新环境，之前在环境里做的改动（文件、安装的软件）"
+                          f"都不在了，需要的话重新做。"), True
+            self._emit({"type": "sandbox_lost", "call_id": call.id, "error": str(e)[:300]})
         except Exception as e:  # noqa: BLE001 — 工具内部异常也要回填给模型，而不是让循环崩掉
             out, error = f"[工具异常] {type(e).__name__}: {e}", True
         finally:
@@ -444,7 +530,15 @@ class Agent:
         limit = self.cm.tool_result_max_chars
         if len(out) <= limit:
             return out
-        rel = Path(".agentrt/outputs") / (re.sub(r"[^\w\-]", "_", call.id) + ".txt")
+        name = re.sub(r"[^\w\-]", "_", call.id) + ".txt"
+        if self.sandbox is not None:   # 不写进任务目录：SWE-bench 取 git diff、Terminal-Bench 的测试都会看它
+            path = f"{self.sandbox.scratch()}/outputs/{self.log.session_id}/{name}"
+            try:
+                self.sandbox.write_bytes(path, out.encode())
+                return truncate_middle(out, limit, hint=f"完整输出已保存到 {path}，可用 read_file 分页读取")
+            except Exception:  # noqa: BLE001 — 落盘失败就只截断
+                return truncate_middle(out, limit, hint="完整输出没能保存，需要的话缩小命令输出范围")
+        rel = Path(".agentrt/outputs") / name
         full = self.ctx.workspace / rel
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(out)
@@ -478,7 +572,7 @@ class Agent:
         return "\n\n".join(parts)
 
     def _user_note(self, text: str) -> dict:
-        m = {"role": "user", "content": text}
+        m = {"role": "user", "content": text, "kind": "harness"}   # harness 自己插的话，不算用户的新一轮
         self._emit({"type": "message", "message": m})
         return m
 
