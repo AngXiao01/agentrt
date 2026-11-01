@@ -34,7 +34,7 @@ KEY_FILE = Path.home() / ".agentrt" / "api_key"
 
 
 def api_key() -> str:
-    """优先环境变量 AGENTRT_API_KEY，其次 ~/.agentrt/api_key（scripts/up51.sh 会写这个文件）。"""
+    """优先环境变量 AGENTRT_API_KEY，其次 ~/.agentrt/api_key。"""
     if os.environ.get("AGENTRT_API_KEY"):
         return os.environ["AGENTRT_API_KEY"]
     try:
@@ -271,7 +271,7 @@ def main(argv=None) -> None:
     sp = sub.add_parser("assistant", help="电脑文件助手（OpenRouter，交互式）")
     sp.add_argument("--workspace", default=".", help="助手能管理的目录，如 ~/Downloads")
     sp.add_argument("--once", metavar="请求", help="只执行一条请求就退出（非交互）")
-    sp.add_argument("--model", default=None, help="默认沿用 ayaka_game 的 OPENROUTER_MODEL")
+    sp.add_argument("--model", default=None, help="默认取 AGENTRT_MODEL / OPENROUTER_MODEL")
     sp.add_argument("--native-tools", action="store_true")
     sp.add_argument("--temperature", type=float, default=0.2)
     sp.add_argument("--max-tokens", type=int, default=2048)
@@ -314,10 +314,10 @@ def main(argv=None) -> None:
         a.fn(a)
     except RetryableError as e:
         sys.exit(f"连不上模型服务 {getattr(a, 'base_url', '')}：{e}\n"
-                 f"多半是本机隧道没开，或者 51 上的 vLLM 没在跑。先运行 ./scripts/up51.sh")
+                 f"检查 --base-url 指向的服务是否在运行、网络是否可达。")
     except LLMError as e:
         if "HTTP 401" in str(e):
-            sys.exit("401：API key 不对。重新运行 ./scripts/up51.sh 会从 51 上取回当前的 key。")
+            sys.exit("401：API key 不对。检查 AGENTRT_API_KEY 或 ~/.agentrt/api_key。")
         raise
 
 
