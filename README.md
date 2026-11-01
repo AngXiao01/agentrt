@@ -2,7 +2,7 @@
 
 一个最小但完整的 agent 运行时。结构对照 Claude Code v2.1.88 源码（query.ts 主循环、权限判定链、microcompact / autocompact、JSONL 会话），逐项对照结果见下文“和 Claude Code 源码的对应”，上下文策略参照 Manus 的 context engineering 六条原则。执行环境按 Claude Managed Agents 的“会话 / harness / sandbox 三分”拆开，并对照了 DeepSeek Harness（`deepseek-ai/deepseek-harness`）的 session 与 sandbox 设计，见“架构：会话 / harness / sandbox”。模型走 OpenAI 兼容接口（vLLM、DeepSeek、OpenRouter 等）。
 
-只依赖 Python 标准库（3.9+）。运行时约 4,400 行，评测约 570 行，测试 159 个（bwrap / Docker 相关的在没有对应环境时跳过），评测任务 8 个；可以通过 Harbor 跑 Terminal-Bench 2.0。
+只依赖 Python 标准库（3.9+）。运行时约 4,400 行，评测约 570 行，测试 161 个（bwrap / Docker 相关的在没有对应环境时跳过），评测任务 8 个；可以通过 Harbor 跑 Terminal-Bench 2.0。
 
 ```
 agentrt/
@@ -14,7 +14,8 @@ agentrt/
   session.py      只追加的 JSONL 事件日志（fsync、脱敏）+ replay
   sandboxes.py    执行环境（“手”）：Local / Bwrap / Docker，三个动词 exec / read_bytes / write_bytes
   coding_tools.py 跑在 sandbox 上的编码工具集（bash / read / write / edit / glob / grep / todo）+ benchmark 用的 agent 组装
-  bench/harbor_agent.py  Harbor 外部 agent：跑 Terminal-Bench 2.0
+  bench/          harbor_agent（Harbor 外部 agent）、preflight（跑分前预检）、tb2（固定版本 + 分层子集）、
+                  report（汇总 Harbor 结果，区分基础设施失败）、stats（区间与配对检验）
   trace.py        会话摘要与时间线
   cli.py          ping / run / resume / trace / sessions
 evals/            8 个任务 + 多配置对照（成功率 + 95% 区间、pass@k / pass^k、配对检验、延迟、token、缓存、成本）
@@ -137,9 +138,22 @@ harbor run -d terminal-bench@2.0 -a agentrt.bench.harbor_agent:AgentRT -m deepse
 # 其他 OpenAI 兼容端点：-m openai/<模型> --ak api_base=http://127.0.0.1:8000/v1 --ae AGENTRT_API_KEY=...
 ```
 
+一键版（预检 → 固定版本的 TB2 → 按难度分层抽子集 → oracle → agentrt → 同模型基线 → 汇总）：
+
+```bash
+scripts/run_tb2.sh deepseek/deepseek-chat                  # 默认 30 个任务 × k=3，基线 terminus-2，并发 3
+N=89 C=4 scripts/run_tb2.sh deepseek/deepseek-chat         # 全量
+python3 -m agentrt.bench.preflight --model deepseek/deepseek-chat   # 只做预检
+python3 -m agentrt.bench.report runs/tb2-*/jobs            # 重新汇总
+```
+
+汇总口径（`agentrt/bench/report.py`）：成功 = reward ≥ 1；agent 超时算失败；容器起不来、镜像拉不下、判分脚本自己挂掉算**基础设施失败**，不进分母、单独列出；oracle（标准解）没拿满分的任务说明这台机器上判分不可信，所有配置都剔掉。配置之间按 (任务, 第几次) 配对做 McNemar 和按任务 bootstrap。
+
+**在哪跑**：TB2 的判分脚本在判分时才从外网装依赖（`apt-get install curl` → `astral.sh` 装 uv → uvx 从 PyPI / GitHub 拉 pytest 和 Python），容器必须有正常的外网。Claude Code 的云会话里实测（预检脚本的输出）：容器解析不了 `deb.debian.org`、`astral.sh`；`github.com`、`pypi.org` 能连上，但 TLS 被出口代理重新签发，容器不信任这张证书。所以在云会话里 oracle 也会判 0 分。要在自己的机器或一台有 Docker 和正常外网的服务器上跑（比如 51），镜像全拉下来需要几十 GB 磁盘。
+
 `-m` 的前缀决定默认端点（`deepseek` / `openrouter` / `openai` / `moonshot` / `qwen`），key 依次读 `AGENTRT_API_KEY`、`DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`……。每个 trial 的完整事件日志在 Harbor 的 `<job>/<trial>/agent/agentrt.jsonl`，用 `python3 -m agentrt trace <路径> --timeline` 看；token、缓存、成本、前缀改写次数写进 Harbor 的 `AgentContext`。价格不写死在代码里，跑之前按厂商当前价目填。
 
-已验证：Harbor 0.25.0 + 本地任务 + 假模型服务端，`harbor run` 端到端 reward 1.0，缓存 / reasoning / 成本字段正确（`tests/test_bench.py` 用假的 async environment 覆盖同一条桥接路径）。没有用真实模型在 Terminal-Bench 上跑过——分数要你自己跑出来。
+已验证：Harbor 0.25.0 + 本地任务 + 假模型服务端，`harbor run` 端到端 reward 1.0，缓存 / reasoning / 成本字段正确；在真实 TB2 任务镜像（`sqlite-db-truncate`）里，工作目录 `/app`、cwd 跨调用保持、超时整组终止都正常（这一次只验证管道，判分因为容器没网是 0）。`tests/test_bench.py` 用假的 async environment 覆盖同一条桥接路径。没有用真实模型在 Terminal-Bench 上跑过。
 
 建议的对照（每组至少 k=3，用 Harbor 的 `-k`）：
 
@@ -264,7 +278,7 @@ python3 -m evals.run_evals --variants baseline,tight_ctx --k 3           # 压�
 
 ```bash
 python3 -m pip install pytest
-python3 -m pytest -q        # 159 个（macOS 沙箱测试只在 macOS 上跑；bwrap / Docker 测试没有对应环境时跳过），不需要模型
+python3 -m pytest -q        # 161 个（macOS 沙箱测试只在 macOS 上跑；bwrap / Docker 测试没有对应环境时跳过），不需要模型
 ```
 
 覆盖：文本协议解析与错误回填、Gemma 角色交替整形、HTTP 重试/退避/超长识别（假 vLLM 服务）、权限链各层（越界、危险命令、密钥、plan 模式、deny 优先于 allow）、超长输出落盘、autocompact 不切断调用与结果、reactive compact、断点恢复（副作用至多一次、只读重跑、网络中断后恢复、已结束会话不重复执行）、日志半行容错与脱敏、cached_tokens 统计、评测判定器自检（空操作失败、标准答案通过、改测试会被识破）。

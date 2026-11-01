@@ -145,3 +145,50 @@ def test_eval_runner_parallel_resume_and_compare(tmp_path):
     assert out2["summary"]["baseline"]["trials"] == 6
     recs = [json.loads(l) for l in (tmp_path / "out" / "trials.jsonl").read_text().splitlines()]
     assert all(r["sandbox"] == "local" for r in recs)
+
+
+# ---------------------------------------------------------------- Harbor 结果汇总 / TB2 子集
+
+def _trial(tmp, agent, task, start, reward=None, exc=None, kwargs=None, cost=None):
+    from pathlib import Path
+    r = {"task_name": task, "trial_name": f"{task}__{agent}__{start}", "started_at": f"2026-11-01T00:00:{start:02d}Z",
+         "agent_info": {"name": agent}, "config": {"agent": {"name": agent, "model_name": "m/x", "kwargs": kwargs or {}}},
+         "agent_result": {"n_input_tokens": 100, "n_cache_tokens": 50, "n_output_tokens": 10, "cost_usd": cost},
+         "verifier_result": {"rewards": {"reward": reward}} if reward is not None else None,
+         "exception_info": {"exception_type": exc} if exc else None}
+    d = Path(tmp) / r["trial_name"]
+    d.mkdir(parents=True)
+    (d / "result.json").write_text(json.dumps(r))
+
+
+def test_harbor_report_separates_infra_and_pairs(tmp_path):
+    from agentrt.bench.report import load_trials, summarize, to_markdown
+    for i, t in enumerate(["a", "b", "c"]):
+        _trial(tmp_path, "oracle", t, i, reward=0.0 if t == "c" else 1.0)   # c 在这台机器上判不了
+    for att in range(2):
+        _trial(tmp_path, "agentrt", "a", 10 + att, reward=1.0, cost=0.01, kwargs={"api_base": "x"})
+        _trial(tmp_path, "agentrt", "b", 20 + att, reward=0.0 if att else 1.0)
+        _trial(tmp_path, "agentrt", "c", 30 + att, reward=1.0)
+        _trial(tmp_path, "terminus-2", "a", 40 + att, reward=0.0)
+        _trial(tmp_path, "terminus-2", "b", 50 + att, exc="RuntimeError")          # 基础设施失败：不进分母
+        _trial(tmp_path, "terminus-2", "c", 60 + att, exc="AgentTimeoutError")     # agent 超时：算失败
+    s = summarize(load_trials([tmp_path]))
+    assert s["broken_tasks"] == ["c"]
+    a, t = s["arms"]["agentrt[m/x]"], s["arms"]["terminus-2[m/x]"]   # api_base 不进配置名
+    assert (a["valid"], a["success"], a["k"]) == (4, 3, 2) and a["pass^k"] == 0.5 and a["pass@k"] == 1.0
+    assert (t["valid"], t["infra_failures"], t["success"]) == (2, 2, 0)
+    c = s["comparisons"]["terminus-2[m/x]"]
+    assert c["vs"] == "agentrt[m/x]" and c["pairs"] == 2 and (c["b"], c["c"]) == (2, 0)
+    assert "已从所有配置剔除" in to_markdown(s)
+
+
+def test_tb2_stratified_subset(tmp_path):
+    from agentrt.bench.tb2 import select
+    for i, d in enumerate(["easy"] * 2 + ["medium"] * 6 + ["hard"] * 4):
+        (tmp_path / f"t{i:02d}").mkdir()
+        (tmp_path / f"t{i:02d}" / "task.toml").write_text(f'[metadata]\ndifficulty = "{d}"\n')
+    picked = select(tmp_path, 6, seed=1)
+    assert len(picked) == 6 and picked == select(tmp_path, 6, seed=1)   # 确定性
+    diffs = [("easy" if int(p[1:]) < 2 else "medium" if int(p[1:]) < 8 else "hard") for p in picked]
+    assert (diffs.count("easy"), diffs.count("medium"), diffs.count("hard")) == (1, 3, 2)
+    assert len(select(tmp_path, 99)) == 12
