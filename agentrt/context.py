@@ -24,15 +24,15 @@ def estimate_tokens(messages: list[dict]) -> int:
     """粗估：ASCII 约 4 字符 1 token，中文等约 1.5 字符 1 token，每条消息另加开销。"""
     total = 0
     for m in messages:
-        text = (m.get("content") or "") + (json.dumps(m.get("tool_calls"), ensure_ascii=False)
-                                           if m.get("tool_calls") else "")
+        text = (m.get("content") or "") + (m.get("reasoning") or "") + (
+            json.dumps(m.get("tool_calls"), ensure_ascii=False) if m.get("tool_calls") else "")
         non_ascii = len(_NON_ASCII.findall(text))
         total += (len(text) - non_ascii) / 4 + non_ascii / 1.5 + 6
     return int(total)
 
 
 CLEARED = "[旧的工具结果已清除；需要的话请重新调用工具]"
-COMPACTABLE = {"read_file", "grep", "list_dir", "find_files", "file_stats", "find_duplicates", "bash"}  # 可再生的结果
+COMPACTABLE = {"read_file", "grep", "glob", "list_dir", "find_files", "file_stats", "find_duplicates", "bash"}  # 可再生的结果
 AUTOCOMPACT_BUFFER_TOKENS = 13_000
 
 
@@ -84,6 +84,7 @@ class ContextManager:
         self.tool_result_max_chars = tool_result_max_chars
         self.enabled = enabled
         self.compactions = 0
+        self.last_summary_usage: Optional[dict] = None   # 主循环取走后清空，用来给摘要调用记账
         self._anchor: Optional[tuple[int, int]] = None   # (到这条为止的消息数, 此时服务端报告的上下文 tokens)
 
     def note_usage(self, n_messages_sent: int, prompt_tokens: int, completion_tokens: int) -> None:
@@ -116,6 +117,7 @@ class ContextManager:
         req = [{"role": "system", "content": "你是一个负责压缩上下文的助手。"},
                {"role": "user", "content": SUMMARY_PROMPT + "\n".join(transcript)}]
         res = self.llm.chat(req, None, call_prefix="summary")
+        self.last_summary_usage = res.usage or {}
         # 摘要里如果带了工具调用标签，去掉，避免被当成调用执行
         return re.sub(r"</?tool_call>", "", res.content).strip()
 
@@ -129,7 +131,8 @@ class ContextManager:
         summary = self._summarize(old)
         self.compactions += 1
         self._anchor = None
-        note = {"role": "user", "content": f"[上下文已压缩（{reason}），以下是此前工作的摘要]\n{summary}"}
+        note = {"role": "user", "content": f"[上下文已压缩（{reason}），以下是此前工作的摘要]\n{summary}",
+                "kind": "summary"}
         return [messages[0], note] + recent
 
     @property

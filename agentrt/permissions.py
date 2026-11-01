@@ -53,6 +53,19 @@ def _match(rules: list[str], tool: Tool, args: dict) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------- sandbox 感知
+
+def sandboxed(tool: Tool, ctx: ToolContext) -> bool:
+    """这次调用在内核层面隔离的 sandbox 里执行（bwrap / 容器），不是宿主机上的裸进程。"""
+    sb = getattr(ctx, "sandbox", None)
+    return bool(getattr(tool, "runs_in_sandbox", False) and sb is not None and sb.enforcement == "full")
+
+
+def disposable(tool: Tool, ctx: ToolContext) -> bool:
+    """在一次性容器里执行：爆炸半径就是容器本身（Claude Code 文档：跳过权限只建议在容器里做）。"""
+    return sandboxed(tool, ctx) and bool(getattr(ctx.sandbox, "disposable", False))
+
+
 # ---------------------------------------------------------------- 内置 hooks
 
 _DANGEROUS = [
@@ -75,7 +88,7 @@ _SECRET = [
 
 
 def dangerous_command_hook(tool: Tool, args: dict, ctx: ToolContext) -> Optional[Decision]:
-    if tool.name != "bash":
+    if tool.name != "bash" or disposable(tool, ctx):   # 一次性容器里 rm -rf 只会伤到容器自己
         return None
     cmd = str(args.get("command", ""))
     for pat, why in _DANGEROUS:
@@ -92,8 +105,8 @@ _SAFE_ABS = ("/usr/", "/bin/", "/sbin/", "/dev/null", "/dev/stdout", "/dev/stder
 
 def workspace_hook(tool: Tool, args: dict, ctx: ToolContext) -> Optional[Decision]:
     """bash 不是沙箱：命令里出现 ../、~ 或工作目录外的绝对路径时要求确认。
-    这是启发式，能被 $(dirname $PWD) 之类绕过；真正的隔离要靠容器 / bwrap。"""
-    if tool.name != "bash":
+    这是启发式，能被 $(dirname $PWD) 之类绕过；真正的隔离要靠容器 / bwrap——有了就不需要它（只会误报）。"""
+    if tool.name != "bash" or sandboxed(tool, ctx):
         return None
     cmd = str(args.get("command", ""))
     if _PARENT_REF.search(cmd):
@@ -120,7 +133,7 @@ def secret_hook(tool: Tool, args: dict, ctx: ToolContext) -> Optional[Decision]:
 class PermissionEngine:
     def __init__(self, mode: str = "default", allow: Optional[list[str]] = None,
                  deny: Optional[list[str]] = None, hooks: Optional[list[Hook]] = None,
-                 ask: Optional[list[str]] = None):
+                 ask: Optional[list[str]] = None, sandbox_auto_allow: bool = True):
         if mode not in MODES:
             raise ValueError(f"mode 必须是 {MODES}")
         self.mode = mode
@@ -128,6 +141,9 @@ class PermissionEngine:
         self.deny = deny or []
         self.ask = ask or []
         self.hooks = hooks if hooks is not None else [secret_hook, dangerous_command_hook, workspace_hook]
+        # 对应 Claude Code 的 sandbox.autoAllowBashIfSandboxed（默认开）：在内核隔离的 sandbox 里跑的 bash 免确认；
+        # 一次性容器里所有 sandbox 工具都免确认。deny / ask 规则、hook 的 deny / ask 照样生效。
+        self.sandbox_auto_allow = sandbox_auto_allow
         for r in self.allow + self.deny + self.ask:
             _parse_rule(r)  # 启动时就校验规则格式
 
@@ -161,6 +177,11 @@ class PermissionEngine:
         if self.mode == "bypass":
             return Decision("allow", "bypass 模式", "mode")
         ro = tool.is_read_only(args)
+        if self.mode in ("default", "auto") and self.sandbox_auto_allow and not ro:
+            if disposable(tool, ctx):
+                return Decision("allow", "在一次性容器里执行", "sandbox")
+            if tool.name == "bash" and sandboxed(tool, ctx):
+                return Decision("allow", "bash 在内核隔离的 sandbox 里执行", "sandbox")
         if self.mode == "plan":
             if ro:
                 return Decision("allow", "plan 模式只读工具", "mode")

@@ -2,6 +2,7 @@
 
     python -m agentrt ping   --base-url http://127.0.0.1:8000/v1
     python -m agentrt run    "任务描述" --workspace ./ws [--mode auto] [--approve cli]
+    python -m agentrt run    "任务描述" --workspace ./ws --sandbox docker:python:3.12-slim   # coding 工具集 + 容器
     python -m agentrt assistant [--workspace ~/Downloads] [--once "请求"]
     python -m agentrt web [--workspace ~/Downloads] [--port 8765]
     python -m agentrt resume <session_id 或 jsonl 路径>
@@ -45,7 +46,8 @@ def api_key() -> str:
 def _llm(a) -> OpenAICompatLLM:
     return OpenAICompatLLM(a.base_url, model=a.model, api_key=api_key(), native_tools=a.native_tools,
                            merge_system=a.merge_system, temperature=a.temperature, max_tokens=a.max_tokens,
-                           max_retries=a.retries)
+                           max_retries=a.retries, reasoning_replay=getattr(a, "reasoning_replay", "turn"),
+                           extra_body=json.loads(a.extra_body) if getattr(a, "extra_body", None) else None)
 
 
 def _printer(verbose: bool):
@@ -79,6 +81,15 @@ def _session_path(ref: str, sessions_dir: Path) -> Path:
 
 
 def _agent(a, llm, log: EventLog, workspace) -> Agent:
+    if getattr(a, "sandbox", None):   # coding 工具集：工具全部在 sandbox 里执行（sandboxes.py / coding_tools.py）
+        from .coding_tools import build_coding_agent
+        from .sandboxes import make_sandbox
+        sb = make_sandbox(a.sandbox, Path(workspace).resolve(), network=a.network)
+        return build_coding_agent(
+            llm, sb, log, max_turns=a.max_turns, approver=APPROVERS[a.approve], on_event=_printer(a.verbose),
+            permissions=PermissionEngine(a.mode, allow=a.allow, deny=a.deny, ask=a.ask),
+            context=ContextManager(llm, max_context_tokens=llm.context_budget(a.max_context), enabled=not a.no_compact),
+            bash_timeout=max(a.bash_timeout, 120.0), extra_tools=_mcp_tools(a))
     tools = None
     if getattr(a, "mcp_config", None):
         from .tools import default_tools
@@ -117,7 +128,12 @@ def cmd_run(a) -> None:
     log = EventLog.new(a.sessions_dir)
     print(f"会话 {log.session_id}  模型 {llm.model}  模式 {a.mode}  工作目录 {Path(a.workspace).resolve()}",
           file=sys.stderr)
-    res = _agent(a, llm, log, a.workspace).run(a.task)
+    agent = _agent(a, llm, log, a.workspace)
+    try:
+        res = agent.run(a.task)
+    finally:
+        if agent.sandbox is not None:
+            agent.sandbox.close()   # 自己创建的容器用完就删
     _report(res, log)
 
 
@@ -179,7 +195,11 @@ def cmd_resume(a) -> None:
     else:
         llm = _llm(a)
         agent = _agent(a, llm, log, a.workspace or start["workspace"])
-    res = agent.resume()
+    try:   # 无状态 harness：一切从日志重建（Managed Agents 的 wake(sessionId)）；sandbox 用 --sandbox 重新接上
+        res = agent.resume()
+    finally:
+        if agent.sandbox is not None:
+            agent.sandbox.close()
     _report(res, log)
 
 
@@ -212,6 +232,9 @@ def main(argv=None) -> None:
         sp.add_argument("--temperature", type=float, default=0.2)
         sp.add_argument("--max-tokens", type=int, default=2048)
         sp.add_argument("--retries", type=int, default=4, help="网络错误重试次数")
+        sp.add_argument("--reasoning-replay", choices=["none", "turn", "all"], default="turn",
+                        help="思考模型的 reasoning_content 回传策略：turn = 当前轮的工具调用链里带回（DeepSeek 规则）")
+        sp.add_argument("--extra-body", help='合并进请求体的 JSON，如 \'{"thinking": {"type": "enabled"}}\'')
 
     def mcp_opts(sp):
         sp.add_argument("--mcp-config", help="MCP 配置文件（含 mcpServers，如 ~/.claude.json），默认不接 MCP")
@@ -229,6 +252,8 @@ def main(argv=None) -> None:
                         help="上下文预算，估算 token 超过其 75%% 时自动压缩；会自动压到服务端 max_model_len 以内")
         sp.add_argument("--no-compact", action="store_true")
         sp.add_argument("--bash-timeout", type=float, default=30.0)
+        sp.add_argument("--sandbox", help="local / bwrap / docker:<镜像> / container:<id>：换成 coding 工具集，工具在 sandbox 里执行")
+        sp.add_argument("--network", action="store_true", help="sandbox 允许联网（bwrap / docker 默认断网）")
         sp.add_argument("-v", "--verbose", action="store_true")
 
     sp = sub.add_parser("ping", help="检查服务端连通性和 usage 字段")

@@ -25,6 +25,11 @@ class ToolContext:
     # 只读调用会并行执行，所以“当前是哪个调用”按线程记。
     on_spawn: Optional[Callable[[str, int], None]] = None
     _local: threading.local = field(default_factory=threading.local, repr=False, compare=False)
+    # 以下给 sandbox 工具集（coding_tools.py）用：执行环境、bash 的当前目录、read-before-write 账本、任务清单
+    sandbox: Optional[object] = None
+    cwd: Optional[str] = None
+    file_state: Optional[object] = None
+    todos: list = field(default_factory=list)
 
     def spawned(self, pgid: int) -> None:
         cid = getattr(self._local, "call_id", None)
