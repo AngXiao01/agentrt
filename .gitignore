@@ -8,3 +8,4 @@ evals_out/
 *.ctl
 .env
 *.key
+.openrouter_key
