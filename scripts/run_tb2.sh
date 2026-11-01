@@ -4,6 +4,7 @@
 #   scripts/run_tb2.sh deepseek/deepseek-chat                      # 默认 30 个任务 × k=3，基线 terminus-2
 #   N=89 K=3 C=4 scripts/run_tb2.sh deepseek/deepseek-chat         # 全量
 #   BASELINE=none AK="reasoning_replay=none" scripts/run_tb2.sh deepseek/deepseek-reasoner
+#   set -a; . scripts/tb2-qwen3.7-flash.env; set +a; scripts/run_tb2.sh   # 用配置文件（MODEL / N / K / C / AK 都在里面）
 #
 # 环境变量：N 任务数（默认 30）、K 每个任务跑几次（3）、C 并发（3）、SEED 抽样种子（0）、
 #           BASELINE 同模型对照的 Harbor agent（terminus-2；none 不跑）、AK 传给 agentrt 的 --ak（空格分隔 k=v）、
@@ -11,7 +12,7 @@
 # key：DEEPSEEK_API_KEY / OPENROUTER_API_KEY / AGENTRT_API_KEY 之一（agentrt 和 terminus-2 都读）。
 set -euo pipefail
 
-MODEL=${1:?用法：scripts/run_tb2.sh <模型，如 deepseek/deepseek-chat>}
+MODEL=${1:-${MODEL:?用法：scripts/run_tb2.sh <模型，如 deepseek/deepseek-chat>，或先设 MODEL}}
 N=${N:-30}; K=${K:-3}; C=${C:-3}; SEED=${SEED:-0}; BASELINE=${BASELINE:-terminus-2}; AK=${AK:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-$ROOT/runs/tb2-$(date +%Y%m%d-%H%M%S)}

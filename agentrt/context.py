@@ -24,7 +24,7 @@ def estimate_tokens(messages: list[dict]) -> int:
     """粗估：ASCII 约 4 字符 1 token，中文等约 1.5 字符 1 token，每条消息另加开销。"""
     total = 0
     for m in messages:
-        text = (m.get("content") or "") + (m.get("reasoning") or "") + (
+        text = (m.get("content") or "") + (m.get("reasoning") or m.get("reasoning_content") or "") + (
             json.dumps(m.get("tool_calls"), ensure_ascii=False) if m.get("tool_calls") else "")
         non_ascii = len(_NON_ASCII.findall(text))
         total += (len(text) - non_ascii) / 4 + non_ascii / 1.5 + 6
@@ -92,10 +92,15 @@ class ContextManager:
         if prompt_tokens:
             self._anchor = (n_messages_sent + 1, prompt_tokens + completion_tokens)
 
+    def estimate(self, messages: list[dict]) -> int:
+        """按真正发出去的消息粗估：内部消息里存着每一轮的 reasoning，但按 reasoning_replay 大多不回传，直接数会高估好几倍。"""
+        wire = getattr(self.llm, "wire", None)
+        return estimate_tokens(wire(messages) if wire else messages)
+
     def count(self, messages: list[dict]) -> int:
         if self._anchor and len(messages) >= self._anchor[0]:
             return self._anchor[1] + estimate_tokens(messages[self._anchor[0]:])
-        return estimate_tokens(messages)
+        return self.estimate(messages)
 
     def _safe_boundary(self, messages: list[dict], keep: int) -> int:
         """找切分点：保留区不能以 tool 结果开头，否则会和它的 assistant 调用分离。"""
@@ -113,7 +118,9 @@ class ContextManager:
                 content = truncate_middle(content, 1500)
                 transcript.append(f"[工具结果 {m.get('name', '')}] {content}")
             else:
-                transcript.append(f"[{role}] {truncate_middle(content, 3000)}")
+                calls = "".join(f"\n  调用 {c.get('name', '')}({truncate_middle(json.dumps(c.get('arguments'), ensure_ascii=False), 800)})"
+                                for c in m.get("tool_calls") or [])   # native 协议下调用不在 content 里
+                transcript.append(f"[{role}] {truncate_middle(content, 3000)}{calls}")
         req = [{"role": "system", "content": "你是一个负责压缩上下文的助手。"},
                {"role": "user", "content": SUMMARY_PROMPT + "\n".join(transcript)}]
         res = self.llm.chat(req, None, call_prefix="summary")
@@ -148,9 +155,10 @@ class ContextManager:
         cleared, n = clear_old_results(messages, self.mc_keep_recent)
         if n:
             self._anchor = None   # 历史被改写，旧的用量锚点作废，回到粗估
-        if n and estimate_tokens(cleared) < self.threshold:
+        if n and self.estimate(cleared) < self.threshold:
             return cleared, "microcompact"
-        summarized = self.compact(cleared, self.keep_recent, "autocompact")
+        # 摘要要看原始历史：microcompact 已经把旧工具结果换成了占位符，拿它做摘要等于什么都没看到
+        summarized = self.compact(messages, self.keep_recent, "autocompact")
         if summarized is not None:
             return summarized, "autocompact"
         return (cleared, "microcompact") if n else None

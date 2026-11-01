@@ -84,13 +84,13 @@ def test_delegate_returns_only_summary_and_is_read_only(tmp_path):
 def test_context_count_uses_server_usage_then_estimates_the_tail():
     cm = ContextManager(ScriptedLLM([]), max_context_tokens=100000)
     msgs = [{"role": "system", "content": "s" * 400}, {"role": "user", "content": "u" * 400}]
-    assert cm.count(msgs) == estimate_tokens(msgs)                      # 还没有用量：回退到粗估
+    assert cm.count(msgs) == cm.estimate(msgs)                          # 还没有用量：回退到按发出的消息粗估
     cm.note_usage(2, prompt_tokens=5000, completion_tokens=100)         # 发出 2 条，服务端说上下文 5100
     msgs.append({"role": "assistant", "content": "a" * 40})
     msgs.append({"role": "tool", "tool_call_id": "x", "name": "grep", "content": "r" * 4000})
     assert cm.count(msgs) == 5100 + estimate_tokens(msgs[3:])           # 锚点覆盖到 assistant（第 3 条），只估算之后新增的
     cm._anchor = (len(msgs) + 5, 1)                                     # 消息被改写（比锚点短）→ 不能再信锚点
-    assert cm.count(msgs) == estimate_tokens(msgs)
+    assert cm.count(msgs) == cm.estimate(msgs)
 
 
 def test_read_only_hint_only_counts_for_trusted_servers(tmp_path):
@@ -110,3 +110,25 @@ def test_read_only_hint_only_counts_for_trusted_servers(tmp_path):
     finally:
         for c in clients:
             c.close()
+
+
+def test_estimate_ignores_reasoning_that_is_not_replayed():
+    cm = ContextManager(ScriptedLLM([], reasoning_replay="none"))
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a", "reasoning": "想" * 30000}]
+    assert cm.estimate(msgs) < 100 < estimate_tokens(msgs)
+
+
+def test_autocompact_summarizes_original_history_with_tool_calls():
+    seen = []
+    llm = ScriptedLLM([lambda m: seen.append(m[-1]["content"]) or "摘要"], native_tools=True)
+    cm = ContextManager(llm, max_context_tokens=2000, compact_ratio=0.5, keep_recent=2, mc_keep_recent=1)
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "任务"}]
+    for i in range(6):
+        name = "bash" if i % 2 else "write_file"   # write_file 的结果不可再生，microcompact 不清，压不下来只能摘要
+        msgs += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "name": name,
+                                                                       "arguments": {"command": f"cmd{i}"}}]},
+                 {"role": "tool", "tool_call_id": f"c{i}", "name": name, "content": f"OUT{i} " + "x" * 1200}]
+    new, reason = cm.maybe_autocompact(msgs)
+    assert reason == "autocompact"
+    assert "OUT1" in seen[0] and "cmd1" in seen[0]     # bash 结果虽被 microcompact 清过，摘要看到的仍是原文和调用

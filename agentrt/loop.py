@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .context import ContextManager, estimate_tokens, truncate_middle
+from .context import ContextManager, truncate_middle
 from .llm import ContextLengthError, LLMError, ToolCall, normalize_usage, to_wire
 from .permissions import Decision, PermissionEngine, deny_all_approver
 from .sandboxes import SandboxLost
@@ -403,8 +403,8 @@ class Agent:
             r.cached_tokens += u["cached"]
             r.compact_tokens += u["prompt"] + u["completion"]
             r.cost_usd += self._cost(u)
-        self._emit({"type": "compact", "reason": reason, "before_tokens": estimate_tokens(before),
-                    "after_tokens": estimate_tokens(after), "messages": after,
+        self._emit({"type": "compact", "reason": reason, "before_tokens": self.cm.estimate(before),
+                    "after_tokens": self.cm.estimate(after), "messages": after,
                     "summary_usage": u if (u["prompt"] or u["completion"]) else None})
 
     def _call_model(self, messages: list[dict]):
@@ -481,7 +481,7 @@ class Agent:
         span = {"type": "span", "kind": "llm", "serial": self._serial, "seconds": round(dt, 3),
                 "prompt_tokens": u["prompt"], "completion_tokens": u["completion"],
                 "cached_tokens": u["cached"], "reasoning_tokens": u["reasoning"],
-                "est_context_tokens": estimate_tokens(messages), "n_messages": len(send),
+                "est_context_tokens": self.cm.estimate(messages), "n_messages": len(send),
                 "prefix_break": brk, "finish_reason": res.finish_reason, "n_calls": len(res.tool_calls)}
         if stamp:
             span["volatile_stamp"] = stamp   # 模型看到的东西都要能从日志重建

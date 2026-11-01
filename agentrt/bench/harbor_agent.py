@@ -90,7 +90,7 @@ class HarborSandbox(_ExecFs):
     def read_bytes(self, path: str) -> bytes:
         p = shlex.quote(self.resolve(path))
         r = self._exec(f"if [ -d {p} ]; then echo 'is a directory' >&2; exit 21; fi; "
-                       f"if command -v base64 >/dev/null 2>&1; then echo B64 && base64 {p}; "
+                       f"if command -v base64 >/dev/null 2>&1; then echo B64 && base64 < {p}; "   # 从 stdin 读：BSD base64 不接受位置参数
                        f"else echo RAW && cat {p}; fi", 60)
         if r.return_code != 0:
             msg = (r.stderr or r.stdout or "").strip()

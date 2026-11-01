@@ -9,3 +9,4 @@ evals_out/
 .env
 *.key
 .openrouter_key
+runs/
