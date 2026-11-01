@@ -44,6 +44,14 @@ KEY_ENVS = ("AGENTRT_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "OPENAI
             "DASHSCOPE_API_KEY")
 
 
+def _key_from_file() -> str:
+    """环境变量都没设时回退到 ~/.agentrt/api_key，和 CLI 一致。"""
+    try:
+        return (Path.home() / ".agentrt" / "api_key").read_text().strip() or "EMPTY"
+    except OSError:
+        return "EMPTY"
+
+
 class HarborSandbox(_ExecFs):
     """把 Harbor 的 async environment 包成同步的 Sandbox。主循环跑在工作线程里，exec 投递回 Harbor 的事件循环。"""
     kind = "harbor"
@@ -153,7 +161,7 @@ if BaseAgent is not None:
 
             o = self.opts
             base, mid = _resolve_model(self.model_name or "", o.get("api_base"), o.get("model_id"))
-            key = next((v for v in (self._get_env(k) for k in KEY_ENVS) if v), "EMPTY")
+            key = next((v for v in (self._get_env(k) for k in KEY_ENVS) if v), None) or _key_from_file()
             extra = o.get("extra_body")
             return _Direct(base, model=mid, api_key=key, native_tools=bool(o.get("native_tools", True)),
                            temperature=float(o.get("temperature", 0.6)), max_tokens=int(o.get("max_tokens", 16384)),
