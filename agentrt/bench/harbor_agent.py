@@ -134,7 +134,7 @@ except ImportError:   # 没装 harbor：只有 HarborSandbox / _resolve_model �
 
 if BaseAgent is not None:
     class AgentRT(BaseAgent):
-        OPTION_KEYS = ("api_base", "model_id", "max_turns", "max_tokens", "max_context", "temperature",
+        OPTION_KEYS = ("api_base", "model_id", "max_turns", "max_tokens", "max_retries", "max_context", "temperature",
                        "native_tools", "reasoning_replay", "extra_body", "price", "bash_timeout", "request_timeout")
 
         def __init__(self, logs_dir, model_name=None, logger=None, *args, **kwargs):
@@ -164,8 +164,8 @@ if BaseAgent is not None:
             key = next((v for v in (self._get_env(k) for k in KEY_ENVS) if v), None) or _key_from_file()
             extra = o.get("extra_body")
             return _Direct(base, model=mid, api_key=key, native_tools=bool(o.get("native_tools", True)),
-                           temperature=float(o.get("temperature", 0.6)), max_tokens=int(o.get("max_tokens", 16384)),
-                           timeout=float(o.get("request_timeout", 600)), max_retries=6,
+                           temperature=float(o.get("temperature", 0.6)), max_tokens=int(o.get("max_tokens", 32768)),
+                           timeout=float(o.get("request_timeout", 600)), max_retries=int(o.get("max_retries", 10)), max_backoff=60.0,
                            reasoning_replay=str(o.get("reasoning_replay", "turn")),
                            extra_body=json.loads(extra) if isinstance(extra, str) else extra)
 

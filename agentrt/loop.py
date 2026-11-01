@@ -91,6 +91,7 @@ class RunResult:
 
 MAX_PARALLEL = 10  # 源码 MAX_TOOL_USE_CONCURRENCY 默认值
 INTERRUPT_MSG = "[用户中断了本次请求]"
+MAX_LENGTH_NUDGES = 3   # 连续被截断且没有调用时，最多提醒几次再放弃
 INTERRUPT_TOOL = "[中断] 用户中断，这个调用没有执行。"
 INTERRUPTED = ("[中断] 上次执行在返回结果之前被中断，结果未知（可能已经生效，也可能没有）。"
                "先检查当前状态，再决定要不要重做。")
@@ -141,6 +142,7 @@ class Agent:
         self._serial = 0          # 全会话的模型调用序号，用来生成不重复的 call id
         self._recent_sigs: list[tuple] = []
         self._empty_nudged = False
+        self._length_nudges = 0   # 连续因长度上限被截断、没有任何工具调用的次数
         self.result = RunResult(session_id=log.session_id)
         self._lock = threading.RLock()  # 只读工具并行执行时保护事件日志和计数器
         self._cancel = threading.Event()  # 用户中断（对应 Claude Code 的 abortController）
@@ -308,6 +310,16 @@ class Agent:
             self._emit({"type": "message", "message": asst})
 
             if not res.tool_calls and not res.parse_errors:
+                if res.finish_reason == "length":   # 被截断不是“做完了”：思考占满输出预算时正文和调用都是空的
+                    self._length_nudges += 1
+                    if self._length_nudges > MAX_LENGTH_NUDGES:
+                        r.final = res.content
+                        return "truncated"
+                    messages.append(self._user_note(
+                        "（上一条输出触到长度上限被截断，没有给出调用或答复。少想一点，直接调用工具推进；"
+                        "大文件拆成多次 write_file / edit_file。）"))
+                    continue
+                self._length_nudges = 0
                 if not res.content.strip() and not self._empty_nudged:
                     self._empty_nudged = True
                     messages.append(self._user_note("（你的回复为空。任务完成了就给出最终答复；没完成就继续调用工具。）"))

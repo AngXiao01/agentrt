@@ -96,3 +96,24 @@ def test_unknown_model_rejected(fake_vllm):
         raise AssertionError
     except Exception as e:  # noqa: BLE001
         assert "nope" in str(e)
+
+
+def test_midread_disconnect_is_retried(fake_vllm, monkeypatch):
+    import http.client
+    import urllib.request
+    real = urllib.request.urlopen
+    state = {"n": 0}
+
+    def flaky(req, timeout=None):
+        if req.full_url.endswith("/chat/completions"):
+            state["n"] += 1
+            if state["n"] <= 2:
+                raise http.client.IncompleteRead(b"x" * 10)
+        return real(req, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", flaky)
+    fake_vllm.queue = [(200, completion("OK"))]
+    slept = []
+    llm = OpenAICompatLLM(fake_vllm.url, model="fake-gemma", sleep=slept.append, max_backoff=5.0)
+    assert llm.chat([{"role": "user", "content": "hi"}]).content == "OK"
+    assert len(slept) == 2 and max(slept) <= 5.0 * 1.5

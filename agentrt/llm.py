@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import re
@@ -182,11 +183,12 @@ class OpenAICompatLLM:
                  timeout: float = 180, max_retries: int = 4, native_tools: bool = False,
                  merge_system: bool = False, temperature: float = 0.2, max_tokens: int = 2048,
                  sleep: Callable[[float], None] = time.sleep, reasoning_replay: str = "turn",
-                 extra_body: Optional[dict] = None):
+                 extra_body: Optional[dict] = None, max_backoff: float = 30.0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
+        self.max_backoff = max_backoff
         self.native_tools = native_tools
         self.merge_system = merge_system
         self.temperature = temperature
@@ -214,8 +216,11 @@ class OpenAICompatLLM:
             if e.code in (408, 429) or e.code >= 500:
                 raise RetryableError(f"HTTP {e.code}: {body[:300]}") from e
             raise LLMError(f"HTTP {e.code}: {body[:500]}") from e
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-            raise RetryableError(str(e)) from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, OSError) as e:
+            # 读响应中途断开（IncompleteRead、SSL EOF）不一定被 urllib 包成 URLError，一并按可重试处理
+            raise RetryableError(f"{type(e).__name__}: {e}") from e
+        except json.JSONDecodeError as e:   # 响应体被截断
+            raise RetryableError(f"响应不是合法 JSON：{e}") from e
 
     def _with_retry(self, fn):
         """指数退避 + 抖动；只重试 RetryableError。"""
@@ -225,7 +230,7 @@ class OpenAICompatLLM:
             except RetryableError:
                 if attempt == self.max_retries:
                     raise
-                delay = min(30.0, 1.0 * 2 ** attempt) * (0.5 + random.random())
+                delay = min(self.max_backoff, 1.0 * 2 ** attempt) * (0.5 + random.random())
                 self._sleep(delay)
 
     def _resolve_model(self, wanted: Optional[str]) -> str:
@@ -317,7 +322,9 @@ class ScriptedLLM:
             raise step
         step = step(messages) if callable(step) else step
         text, reasoning = (step.get("content", ""), step.get("reasoning", "")) if isinstance(step, dict) else (step, "")
+        finish = step.get("finish_reason", "") if isinstance(step, dict) else ""
         calls, errors = parse_text_tool_calls(text, call_prefix)
         return ChatResult(content=text, tool_calls=calls, parse_errors=errors, reasoning=reasoning,
+                          finish_reason=finish,
                           usage={"prompt_tokens": sum(len(m.get("content") or "") for m in messages) // 4,
                                  "completion_tokens": len(text) // 4})

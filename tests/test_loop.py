@@ -423,3 +423,18 @@ def test_resume_does_not_kill_a_reused_process_group(tmp_path):
     finally:
         os.killpg(other.pid, signal.SIGKILL)
         other.wait()
+
+
+def test_truncated_empty_reply_is_not_end_turn(make_agent):
+    cut = {"content": "", "reasoning": "想了很久", "finish_reason": "length"}
+    agent, llm, ws, log = make_agent([cut, cut, "完成"])
+    res = agent.run("x")
+    assert res.status == "end_turn" and res.final == "完成" and res.turns == 3
+    assert any("长度上限" in (m.get("content") or "") for m in llm.calls[1])
+
+
+def test_truncated_forever_gives_up_as_truncated(make_agent):
+    cut = {"content": "", "finish_reason": "length"}
+    agent, llm, ws, log = make_agent([cut] * 6)
+    res = agent.run("x")
+    assert res.status == "truncated" and res.turns == 4
