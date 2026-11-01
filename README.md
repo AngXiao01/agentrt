@@ -130,7 +130,8 @@ Terminal-Bench 2.0 的排行榜按“模型 + harness”组合计分，同一个
 ```bash
 pip install harbor            # 需要 Docker
 export DEEPSEEK_API_KEY=...
-harbor run -d terminal-bench@2.0 -a agentrt.bench.harbor_agent:AgentRT -m deepseek/deepseek-chat -n 8 \
+export PYTHONPATH=$PWD        # 在仓库根目录执行：Harbor 按 import 路径加载 agentrt（仓库没有打包）
+harbor run -d terminal-bench@2.0 -a agentrt.bench.harbor_agent:AgentRT -m deepseek/deepseek-chat -n 8 -k 3 \
     --ak max_turns=100 --ak reasoning_replay=turn \
     --ak 'price={"input": <每百万输入>, "cached": <每百万缓存命中>, "output": <每百万输出>}'
 # 其他 OpenAI 兼容端点：-m openai/<模型> --ak api_base=http://127.0.0.1:8000/v1 --ae AGENTRT_API_KEY=...
