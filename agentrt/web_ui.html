@@ -8,15 +8,108 @@
 :root{--bg:#f6f5f2;--panel:#fff;--ink:#1f2328;--mute:#6b7280;--line:#e4e2dc;--accent:#c2552d;--accent-ink:#fff;--ok:#2f7d4f;--bad:#b3261e;--warn-bg:#fff6e5;--warn-line:#f0d9a8;--code:#f1efe9}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#1f1f1d;--ink:#ecebe6;--mute:#9a988f;--line:#33322e;--accent:#e0714a;--accent-ink:#1a1a18;--ok:#5fb383;--bad:#f07a70;--warn-bg:#2b2517;--warn-line:#5a4a22;--code:#2a2926}}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column}
+header{display:flex;gap:12px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.2px}
 nav{display:flex;gap:4px}
 nav a{font-size:14px;padding:5px 12px;border-radius:8px;color:var(--mute);text-decoration:none}
 nav a.on{background:var(--code);color:var(--ink);font-weight:600}
-.view{display:none;flex:1;min-height:0;flex-direction:column}
+.grow{flex:1}
+.badge{font-size:12px;color:var(--mute)}
+#summary{font-family:ui-monospace,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+button{font:inherit;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--mute)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+button.stop{background:var(--bad);border-color:var(--bad);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+input,select,textarea{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
+textarea:focus,input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+code,pre{font-family:ui-monospace,Menlo,monospace}
+.view{display:none;flex:1;min-height:0}
 .view.on{display:flex}
-#chat-tools{display:contents}
-body:not(.chat) #chat-tools{display:none}
-#mdl{width:230px;font-family:ui-monospace,Menlo,monospace}
+
+/* 会话页 */
+aside{width:260px;flex-shrink:0;border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-height:0}
+aside .top{padding:10px;display:flex;gap:8px;border-bottom:1px solid var(--line)}
+aside .top button{flex:1}
+#sessions{overflow-y:auto;flex:1;padding:6px}
+.sess{display:block;width:100%;text-align:left;border:0;background:none;padding:7px 9px;border-radius:8px;margin-bottom:2px}
+.sess:hover{background:var(--code)}
+.sess.cur{background:var(--code);box-shadow:inset 3px 0 0 var(--accent)}
+.sess.viewing{background:var(--code)}
+.sess .tt{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess .mm{display:block;font-size:11px;color:var(--mute)}
+.pane{flex:1;min-width:0;display:flex;flex-direction:column}
+.bar{display:flex;gap:10px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line);font-size:13px;color:var(--mute);flex-wrap:wrap}
+.bar label{display:flex;gap:4px;align-items:center;cursor:pointer}
+#sid{font-family:ui-monospace,Menlo,monospace;color:var(--ink)}
+#side-toggle{display:none}
+main{flex:1;overflow-y:auto;padding:18px 16px}
+.col{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
+.histbar{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:10px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px}
+footer{border-top:1px solid var(--line);background:var(--panel);padding:10px 16px}
+footer .col{gap:6px}
+.inrow{display:flex;gap:8px;align-items:flex-end}
+#inp{flex:1;resize:none;font-size:15px;padding:9px 12px;border-radius:10px;max-height:180px}
+.status{font-size:13px;color:var(--mute);display:flex;gap:6px;align-items:center;min-height:20px}
+.status.busy{color:var(--accent)}.status.wait{color:var(--bad);font-weight:600}
+.status.idle #glyph{color:var(--ok)}
+.hero{text-align:center;margin-top:7vh}.hero h2{margin:0 0 6px;font-size:22px}.hero p{margin:0 auto;color:var(--mute);max-width:560px;font-size:14px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:14px}
+.chip{border-radius:999px}
+@media (max-width:760px){
+  aside{display:none;position:fixed;top:49px;bottom:0;left:0;z-index:5;width:82vw;box-shadow:0 0 0 100vw rgba(0,0,0,.25)}
+  aside.open{display:flex}
+  #side-toggle{display:inline-block}
+  #summary{display:none}
+}
+
+/* 轨迹（会话和跑分共用） */
+.ev{font-size:13px;border-left:2px solid var(--line);padding:3px 0 3px 10px;min-width:0}
+.ev .t{color:var(--mute);font-variant-numeric:tabular-nums;display:inline-block;min-width:54px;font-size:12px}
+.ev pre,.card pre,.ans pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;max-height:300px;overflow:auto;background:var(--code);padding:8px;border-radius:8px;color:var(--ink)}
+.ev summary{cursor:pointer;color:var(--mute)}
+.ev.llm{color:var(--mute);border-left-color:transparent;font-size:12px}
+.hide-llm .ev.llm{display:none}
+.ev.warn{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:8px;padding:6px 10px}
+.ev.end{border-left-color:var(--ok);color:var(--mute)}
+.ev.start{color:var(--mute)}
+.ev b{color:var(--ink)}
+.user{align-self:flex-end;background:var(--accent);color:var(--accent-ink);max-width:85%;padding:9px 14px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
+.ans{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;white-space:pre-wrap;word-break:break-word}
+.ans code,.ev code{font-size:12.5px;background:var(--code);padding:1px 5px;border-radius:5px}
+.tag{font-size:11px;padding:0 6px;border-radius:5px;margin-left:4px;background:var(--code);color:var(--mute)}
+.tag.red{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.bad{color:var(--bad)}.good{color:var(--ok)}
+.approval{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:12px;padding:12px 14px}
+.approval h3{margin:0 0 4px;font-size:14px}
+.approval .why{font-size:13px;color:var(--mute);margin-bottom:6px}
+.approval pre{margin:0 0 10px;white-space:pre-wrap;font-size:12.5px;max-height:240px;overflow:auto;background:var(--panel);border:1px solid var(--line);padding:8px;border-radius:8px}
+.approval .row{display:flex;gap:8px;flex-wrap:wrap}
+.sys{align-self:center;font-size:12px;color:var(--mute);text-align:center}
+.dots::after{content:"";animation:d 1.2s steps(4) infinite}
+@keyframes d{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+
+/* 设置 */
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);padding:0;width:min(640px,calc(100vw - 32px));max-height:calc(100dvh - 40px)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 40px)}
+dialog h2{margin:0;font-size:16px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.fields{padding:14px 18px;overflow-y:auto;display:grid;grid-template-columns:1fr 1fr;gap:12px 14px}
+.f{display:flex;flex-direction:column;gap:4px;font-size:13px;min-width:0}
+.f.full{grid-column:1/-1}
+.f span{color:var(--mute);font-size:12px}
+.f.check{flex-direction:row;align-items:center;gap:6px}
+.f textarea{font-family:ui-monospace,Menlo,monospace;resize:vertical;min-height:60px}
+.f input[type=text]{font-family:ui-monospace,Menlo,monospace}
+.sec{grid-column:1/-1;font-size:12px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.5px;margin-top:4px;border-top:1px solid var(--line);padding-top:10px}
+.sec:first-child{border-top:0;margin-top:0;padding-top:0}
+.actions{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line);align-items:center}
+.actions .err{flex:1;color:var(--bad);font-size:13px}
+@media (max-width:560px){.fields{grid-template-columns:1fr}}
+
+/* 跑分页 */
 #runs{flex:1;overflow-y:auto;padding:20px 16px}
 .wide{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .crumbs{font-size:13px;color:var(--mute)}.crumbs a{color:var(--accent);text-decoration:none}
@@ -41,155 +134,195 @@ td.num,th.num{text-align:right}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
 .stat span{display:block;font-size:12px;color:var(--mute)}
 .stat .big{font-size:17px}
-.bar{height:6px;border-radius:3px;background:var(--code);overflow:hidden;margin-top:6px}.bar i{display:block;height:100%;background:var(--accent)}
-.tl{display:flex;flex-direction:column;gap:6px}
-.ev{font-size:13px;border-left:2px solid var(--line);padding:3px 0 3px 10px}
-.ev .t{color:var(--mute);font-variant-numeric:tabular-nums;display:inline-block;min-width:58px}
-.ev pre,.card pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Menlo,monospace;max-height:280px;overflow:auto;background:var(--code);padding:8px;border-radius:8px;color:var(--ink)}
-.ev.llm{color:var(--mute);border-left-color:transparent}
-.ev.warn{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:8px;padding:6px 10px}
-.ev.end{border-left-color:var(--ok)}
-.tag{font-size:11px;padding:0 6px;border-radius:5px;margin-left:4px;background:var(--code);color:var(--mute)}
-.tag.red{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.progress{height:6px;border-radius:3px;background:var(--code);overflow:hidden;margin-top:6px}.progress i{display:block;height:100%;background:var(--accent)}
 .filters{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--mute)}
+.filters label{display:flex;gap:4px;align-items:center;cursor:pointer}
+.tl{display:flex;flex-direction:column;gap:6px}
 .empty{color:var(--mute);text-align:center;padding:40px 0}
-header{display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
-header h1{font-size:16px;margin:0 8px 0 0;font-weight:650}
-header input,header select{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
-#ws{flex:1;min-width:180px;font-family:ui-monospace,Menlo,monospace}
-.badge{font-size:12px;color:var(--mute)}
-button{font:inherit;font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
-button:hover{border-color:var(--mute)}
-button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
-button:disabled{opacity:.5;cursor:default}
-main{flex:1;overflow-y:auto;padding:20px 16px}
-.col{max-width:820px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
-.msg{padding:10px 14px;border-radius:12px;white-space:pre-wrap;word-break:break-word}
-.user{align-self:flex-end;background:var(--accent);color:var(--accent-ink);max-width:85%}
-.final{background:var(--panel);border:1px solid var(--line)}
-.final .meta{display:block;margin-top:8px;font-size:12px;color:var(--mute)}
-.sys{align-self:center;font-size:12px;color:var(--mute)}
-.step{font-size:13px;color:var(--mute);border-left:2px solid var(--line);padding:2px 0 2px 10px}
-.step b{color:var(--ink);font-weight:600}
-.step code,.final code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);padding:1px 5px;border-radius:5px}
-.step details{margin-top:2px}
-.step pre{margin:4px 0 0;white-space:pre-wrap;font:12px/1.5 ui-monospace,Menlo,monospace;max-height:220px;overflow:auto;background:var(--code);padding:8px;border-radius:8px;color:var(--ink)}
-.bad{color:var(--bad)}.good{color:var(--ok)}
-.approval{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:12px;padding:12px 14px}
-.approval h3{margin:0 0 4px;font-size:14px}
-.approval .why{font-size:13px;color:var(--mute);margin-bottom:6px}
-.approval pre{margin:0 0 10px;white-space:pre-wrap;font:12.5px/1.5 ui-monospace,Menlo,monospace;max-height:240px;overflow:auto;background:var(--panel);border:1px solid var(--line);padding:8px;border-radius:8px}
-.approval .row{display:flex;gap:8px;flex-wrap:wrap}
-.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:10px}
-.chip{border-radius:999px;font-size:13px}
-.hero{text-align:center;margin-top:8vh}.hero h2{margin:0 0 6px;font-size:22px}.hero p{margin:0;color:var(--mute)}
-footer{border-top:1px solid var(--line);background:var(--panel);padding:12px 16px}
-footer .col{flex-direction:row;gap:8px;align-items:flex-end}
-textarea{flex:1;resize:none;font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);max-height:160px}
-textarea:focus,input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
-.status{font-size:13px;color:var(--mute);display:flex;gap:6px;align-items:center;min-height:20px}
-.status.busy{color:var(--accent)}.status.wait{color:var(--bad);font-weight:600}
-.status.idle #glyph{color:var(--ok)}
-button.stop{background:var(--bad);border-color:var(--bad);color:#fff}
-.dots::after{content:"";animation:d 1.2s steps(4) infinite}
-@keyframes d{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
 </style>
 </head>
 <body>
 <header>
   <h1>agentrt</h1>
-  <nav><a href="#chat" id="nav-chat">对话</a><a href="#runs" id="nav-runs">跑分</a></nav>
-  <span id="chat-tools">
-  <input id="ws" placeholder="工作范围，如 ~/Downloads" spellcheck="false" aria-label="工作范围">
-  <select id="mode" aria-label="权限模式">
-    <option value="default">改动前确认</option>
-    <option value="plan">只读</option>
-    <option value="auto">自动执行（删除仍确认）</option>
-  </select>
-  <input id="mdl" placeholder="模型，如 deepseek/deepseek-v4.1-flash" spellcheck="false" aria-label="模型">
-  <button id="apply">应用</button>
-  <button id="clear">清空对话</button>
-  </span>
+  <nav><a href="#chat" id="nav-chat">会话</a><a href="#runs" id="nav-runs">跑分</a></nav>
+  <span class="grow"></span>
+  <span class="badge" id="summary"></span>
 </header>
+
 <section class="view" id="view-chat">
-<main id="main"><div class="col" id="log"></div></main>
-<footer><div class="col" style="flex-direction:column;align-items:stretch;gap:6px"><div id="status" class="status idle"><span id="glyph">●</span> <span id="stext">空闲，可以输入</span></div><div style="display:flex;gap:8px;align-items:flex-end">
-  <textarea id="inp" rows="1" placeholder="告诉我想找什么、统计什么、清理什么…（Enter 发送，Shift+Enter 换行）"></textarea>
-  <button class="primary" id="send">发送</button>
-</div></div></footer>
+  <aside id="side">
+    <div class="top"><button class="primary" id="new">新会话</button><button id="refresh" title="刷新列表">刷新</button></div>
+    <div id="sessions"></div>
+  </aside>
+  <div class="pane">
+    <div class="bar">
+      <button id="side-toggle">历史</button>
+      <span>会话 <span id="sid">—</span></span>
+      <span class="grow"></span>
+      <label><input type="checkbox" id="o-llm" checked> 模型调用</label>
+      <label><input type="checkbox" id="o-think"> 展开思考</label>
+      <button id="open-settings">设置</button>
+    </div>
+    <main id="main"><div class="col" id="log"></div><div class="col" id="hist" hidden></div></main>
+    <footer id="foot"><div class="col">
+      <div id="status" class="status idle"><span id="glyph">●</span> <span id="stext">空闲，可以输入</span></div>
+      <div class="inrow">
+        <textarea id="inp" rows="1" placeholder="给 agent 一个任务…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="primary" id="send">发送</button>
+      </div>
+    </div></footer>
+  </div>
 </section>
+
 <section class="view" id="view-runs"><div id="runs"><div class="wide" id="runs-body"></div></div></section>
+
+<dialog id="settings"><form method="dialog" id="sform">
+  <h2>agent 设置 <span class="badge">（应用后开一个新会话）</span></h2>
+  <div class="fields">
+    <div class="sec">模型</div>
+    <label class="f full"><span>模型 id</span><input type="text" name="model" placeholder="deepseek/deepseek-v4.1-flash" spellcheck="false"></label>
+    <label class="f"><span>单次输出上限 max_tokens</span><input type="number" name="max_tokens" min="1"></label>
+    <label class="f"><span>temperature</span><input type="number" name="temperature" step="0.1" min="0" max="2"></label>
+    <label class="f check full"><input type="checkbox" name="native_tools"> 用 native function calling（关掉就用文本协议 &lt;tool_call&gt;）</label>
+    <label class="f full"><span>请求体附加字段（JSON，如 OpenRouter 的 provider / reasoning）</span><textarea name="extra_body" spellcheck="false" placeholder='{"provider": {"order": ["wafer/us"], "allow_fallbacks": false}}'></textarea></label>
+    <div class="sec">工具与执行环境</div>
+    <label class="f full"><span>工作目录</span><input type="text" name="workspace" spellcheck="false"></label>
+    <label class="f"><span>工具集</span><select name="sb_kind">
+      <option value="">本地工具（直接在工作目录里）</option>
+      <option value="local">sandbox 工具集 · 本机</option>
+      <option value="bwrap">sandbox 工具集 · bwrap</option>
+      <option value="docker">sandbox 工具集 · Docker 新容器</option>
+      <option value="container">sandbox 工具集 · 已有容器</option>
+    </select></label>
+    <label class="f" id="sb-arg-wrap"><span id="sb-arg-label">镜像</span><input type="text" name="sb_arg" spellcheck="false" placeholder="python:3.12-slim"></label>
+    <label class="f check full" id="net-wrap"><input type="checkbox" name="network"> sandbox 允许联网</label>
+    <label class="f full"><span>MCP 配置文件（可选，含 mcpServers，如 ~/.claude.json）</span><input type="text" name="mcp_config" spellcheck="false"></label>
+    <div class="sec">权限与预算</div>
+    <label class="f full"><span>权限模式</span><select name="mode">
+      <option value="plan">plan · 只读，所有改动都拒绝</option>
+      <option value="default">default · 只读工具直接跑，改动前问你</option>
+      <option value="auto">auto · 大多数改动直接做，高风险的还是问你</option>
+      <option value="bypass">bypass · 全部直接做（只在一次性容器里用）</option>
+    </select></label>
+    <label class="f"><span>每轮最多模型调用</span><input type="number" name="max_turns" min="1"></label>
+    <label class="f"><span>上下文上限（超过就压缩）</span><input type="number" name="max_context" min="2000" step="1000"></label>
+  </div>
+  <div class="actions"><span class="err" id="serr"></span><button value="cancel" formnovalidate>取消</button><button class="primary" id="sapply" value="apply">应用并开新会话</button></div>
+</form></dialog>
+
 <script>
 const T = new URLSearchParams(location.search).get("t");
 const $ = id => document.getElementById(id);
-const log = $("log"), main = $("main");
-const SUGGEST = ["统计这个目录下各类文件的数量和占用空间","找出最大的 20 个文件","列出最近 7 天修改过的文件","找出重复的文件","找名字里带“发票”的 pdf","把 2023 年以前的 .log 文件清理掉"];
 const api = (p, body) => fetch(p + "?t=" + T, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}).then(r => r.json());
-const esc = s => s.replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
-const md = s => esc(s).replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-let busy = false, thinking = null, steps = {};
-let phase = "idle", t0 = 0, nSteps = 0, tokens = 0, frame = 0;
-const FR = ["◐","◓","◑","◒"];
-function setPhase(p, detail) { phase = p; if (p === "idle") t0 = 0; else if (!t0) { t0 = Date.now(); nSteps = 0; tokens = 0; } window.detail = detail || ""; render(); }
+const rget = (p, q) => fetch(p + "?t=" + T + Object.entries(q || {}).map(([k, v]) => "&" + k + "=" + encodeURIComponent(v)).join("")).then(r => r.json());
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const md = s => esc(s).replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, c) => `<pre>${c}</pre>`)
+  .replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+const k = n => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+const usd = x => x == null ? "—" : "$" + (x < 0.01 ? x.toFixed(4) : x.toFixed(3));
+const sec = x => x == null ? "—" : x >= 60 ? Math.floor(x / 60) + "m" + String(Math.round(x % 60)).padStart(2, "0") + "s" : (x < 10 ? x.toFixed(1) : Math.round(x)) + "s";
+const pct = (a, b) => b ? Math.round(100 * (a || 0) / b) + "%" : "0%";
+
+// ---------------------------------------------------------------- 轨迹渲染：实时会话、历史会话、跑分 trial 共用
+function argsText(s) {
+  try { const a = JSON.parse(s);
+    if (a.command) return a.command;
+    if (a.path && (a.content != null || a.old_string != null)) return a.path + "\n" + (a.content ?? `- ${a.old_string}\n+ ${a.new_string}`);
+    return JSON.stringify(a, null, 2);
+  } catch (_) { return s; }
+}
+function Trace(box, opts) {
+  const tools = {};
+  const node = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; box.appendChild(d); return d; };
+  const t = e => opts.times === false ? "" : `<span class="t">${sec(e.at)}</span>`;
+  const think = r => r ? `<details class="think"${$("o-think").checked || opts.openThink ? " open" : ""}><summary>思考 · ${k(r.length)} 字符</summary><pre>${esc(r)}</pre></details>` : "";
+  return {
+    add(e) {
+      switch (e.kind) {
+        case "start": return node("ev start", `${t(e)}会话开始 · ${esc(e.model || "")} · ${e.sandbox ? "sandbox " + esc(e.sandbox) : "本地工具"} · ${esc(e.mode || "")}${e.budget ? ` · 时限 ${sec(e.budget)}` : ""}
+          <details><summary>${opts.task ? "任务描述、" : ""}工具 ${e.tools.length} 个、模型参数</summary>${opts.task ? `<pre>${esc(e.task)}</pre>` : ""}<pre>工具：${esc(e.tools.join(", "))}\n工作目录：${esc(e.workspace || "")}\n${esc(JSON.stringify(e.params, null, 2))}</pre></details>`);
+        case "user": return node("user", esc(e.text));
+        case "assistant": {
+          if (!e.content.trim() && !e.reasoning) return;
+          return node(e.content.trim() ? "ans" : "ev", (e.content.trim() ? md(e.content.trim()) : `${t(e)}<span class="badge">（只有思考）</span>`) + think(e.reasoning)); }
+        case "llm": return node("ev llm", `${t(e)}#${e.serial} 模型 ${sec(e.seconds)} · 输入 ${k(e.prompt)}（缓存 ${pct(e.cached, e.prompt)}）· 输出 ${k(e.completion)}${e.reasoning ? `（思考 ${k(e.reasoning)}）` : ""}
+          ${e.finish === "length" ? `<span class="tag red">截断</span>` : ""}${e.think === false ? `<span class="tag">关思考</span>` : ""}${e.prefix_break != null ? `<span class="tag">缓存断点 ${e.prefix_break}</span>` : ""}`);
+        case "tool": return tools[e.id] = node("ev", `${t(e)}<b>${esc(e.name)}</b> <span class="st badge dots">执行中</span><pre>${esc(argsText(e.args))}</pre><div class="res"></div>`);
+        case "result": {
+          const el = tools[e.id] || node("ev", `${t(e)}<b>结果</b><div class="res"></div>`);
+          const st = el.querySelector(".st");
+          if (st) { st.className = "st " + (e.denied || e.error ? "bad" : "good"); st.textContent = (e.denied ? "已拒绝" : e.error ? "出错" : "✓") + " " + sec(e.seconds); }
+          el.querySelector(".res").innerHTML = `<details><summary>${esc(e.content.split("\n").slice(0, 2).join(" ").slice(0, 140) || "（空）")}</summary><pre>${esc(e.content)}</pre></details>`;
+          return el; }
+        case "dropped": return node("ev warn", `${t(e)}<b>只思考没动作、被截断，已丢弃</b>（接着关掉思考重试）${think(e.reasoning)}`);
+        case "harness": return node("ev warn", `${t(e)}<b>harness 提醒</b> ${esc(e.text)}`);
+        case "note": return node("ev warn", `${t(e)}${esc(e.text)}`);
+        case "end": { const s = e.stats || {};
+          return node("ev end", `${t(e)}<b>${e.status === "end_turn" ? "本轮完成" : "本轮结束：" + esc(e.status)}</b>${s.llm_calls != null ? ` · ${s.llm_calls} 次模型调用 · ${s.tool_calls} 次工具 · 输入 ${k(s.prompt_tokens)} · 输出 ${k(s.completion_tokens)} · ${sec(s.wall_seconds)}${s.cost_usd ? " · " + usd(s.cost_usd) : ""}` : ""}`); }
+      }
+    },
+    clear() { box.innerHTML = ""; for (const id in tools) delete tools[id]; },
+  };
+}
+
+// ---------------------------------------------------------------- 会话页
+const log = $("log"), hist = $("hist"), main = $("main");
+const live = Trace(log, {});
+let state = null, busy = false, viewing = null;
+let phase = "idle", t0 = 0, nSteps = 0, tokens = 0, frame = 0, detail = "";
+const FR = ["◐", "◓", "◑", "◒"];
+const SUGGEST = ["看看工作目录里有什么，总结这是个什么项目", "找出这个目录里最大的 10 个文件", "写一个 Python 脚本打印斐波那契数列前 20 项，运行验证", "检查 README 里的命令能不能跑通"];
+
+function setPhase(p, d) { phase = p; detail = d || ""; if (p === "idle") t0 = 0; else if (!t0) { t0 = Date.now(); nSteps = 0; tokens = 0; } render(); }
 function render() {
-  const st = $("status"), secs = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
-  const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + "k" : n;
+  const st = $("status"), s = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
   if (phase === "idle") { st.className = "status idle"; $("glyph").textContent = "●"; $("stext").textContent = "空闲，可以输入"; }
-  else if (phase === "wait") { st.className = "status wait"; $("glyph").textContent = "!"; $("stext").textContent = `等你确认后才会继续（${secs}s）`; }
+  else if (phase === "wait") { st.className = "status wait"; $("glyph").textContent = "!"; $("stext").textContent = `等你确认后才会继续（${s}s）`; }
   else { st.className = "status busy"; $("glyph").textContent = FR[frame % 4];
-    $("stext").textContent = (phase === "tool" ? `正在执行 ${window.detail}…` : "思考中…") + ` ${secs}s · ${nSteps} 步 · ${fmt(tokens)} tokens · 按 Esc 或点「中断」可停止（现在也可以先输入下一条）`; }
+    $("stext").textContent = (phase === "tool" ? `正在执行 ${detail}…` : "模型思考中…") + ` ${s}s · ${nSteps} 次工具 · ${k(tokens)} tokens · Esc 中断`; }
   $("send").textContent = busy ? "中断" : "发送"; $("send").className = busy ? "stop" : "primary";
 }
 setInterval(() => { frame++; if (phase !== "idle") render(); }, 250);
+const scroll = () => { main.scrollTop = main.scrollHeight; };
+const sys = (text, cls) => { const d = document.createElement("div"); d.className = "sys " + (cls || ""); d.textContent = text; log.appendChild(d); scroll(); };
 
-function add(cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; log.appendChild(d); scroll(); return d; }
-function scroll() { main.scrollTop = main.scrollHeight; }
 function hero() {
-  log.innerHTML = `<div class="hero"><h2>想找点什么？</h2><p>用大白话告诉我名字、日期、大小等条件，我来搜索、统计或清理。</p><div class="chips"></div></div>`;
-  SUGGEST.forEach(t => { const b = document.createElement("button"); b.className = "chip"; b.textContent = t; b.onclick = () => send(t); log.querySelector(".chips").appendChild(b); });
+  const c = state && state.config || {};
+  log.innerHTML = `<div class="hero"><h2>新会话</h2><p>${esc(c.model || "")} · ${c.sandbox ? "sandbox " + esc(c.sandbox) : "本地工具"} · 权限 ${esc(c.mode || "")}<br>工作目录 <code>${esc(c.workspace || "")}</code></p><div class="chips"></div></div>`;
+  SUGGEST.forEach(s => { const b = document.createElement("button"); b.className = "chip"; b.textContent = s; b.onclick = () => send(s); log.querySelector(".chips").appendChild(b); });
 }
-function argsBrief(a) {
-  const s = Object.entries(a).map(([k, v]) => `${k}=${Array.isArray(v) ? `[${v.length} 项]` : JSON.stringify(v)}`).join(" ");
-  return s.length > 140 ? s.slice(0, 140) + "…" : s;
-}
-function setBusy(b) { busy = b; render(); }
 function applyState(s) {
-  if (!s) return;
-  $("ws").value = s.workspace; $("mode").value = s.mode === "bypass" ? "auto" : s.mode; $("mdl").value = s.model;
+  if (!s) return; state = s; const c = s.config || {};
+  $("sid").textContent = s.session_id || "—";
+  $("summary").textContent = `${c.model} · ${c.sandbox || "本地工具"} · ${c.mode} · ${s.tools.length} 个工具`;
+  markSessions();
 }
 
 function handle(e) {
-  if (log.querySelector(".hero") && e.kind !== "system" && e.kind !== "idle") log.innerHTML = "";
+  if (log.querySelector(".hero") && ["ev", "approval"].includes(e.kind)) log.innerHTML = "";
   switch (e.kind) {
-    case "user": add("msg user", esc(e.text)); busy = true; setPhase("think"); break;
-    case "tool": nSteps++; setPhase("tool", e.name);
-      steps[e.id] = add("step", `<b>${esc(e.name)}</b> <code>${esc(argsBrief(e.args))}</code><span class="res"></span>`); break;
-    case "span": tokens += e.tokens || 0; break;
-    case "result": {
-      const el = steps[e.id]; if (!el) break;
-      const cls = e.denied || e.error ? "bad" : "good";
-      const head = esc(e.content.split("\n")[0].slice(0, 90));
-      setPhase("think");
-      el.querySelector(".res").innerHTML = ` <span class="${cls}">${e.denied ? "已拒绝" : e.error ? "出错" : "✓"}</span><details><summary>${head}</summary><pre>${esc(e.content)}</pre></details>`;
-      break; }
+    case "ev": { const it = e.item;
+      if (!e.replay) {   // 打开历史会话时回放的条目只展示，不改状态栏
+        if (it.kind === "user") { busy = true; setPhase("think"); }
+        else if (it.kind === "tool") { nSteps++; setPhase("tool", it.name); }
+        else if (it.kind === "result") setPhase("think");
+        else if (it.kind === "llm") tokens += (it.prompt || 0) + (it.completion || 0);
+      }
+      live.add(it); break; }
     case "approval": setPhase("wait"); showApproval(e); break;
-    case "approval_done": { const el = document.getElementById("ap-" + e.id); if (el) { el.querySelector(".row").innerHTML = `<span class="${e.ok ? "good" : "bad"}">${e.ok ? "已允许" : "已拒绝"}</span>`; } setPhase("think"); break; }
-    case "final":
-      add("msg final", md(e.text) + (e.stats && e.stats.calls ? `<span class="meta">${e.stats.tools} 次操作 · ${e.stats.seconds}s · ${e.stats.tokens} tokens</span>` : "")); break;
-    case "idle": busy = false; setPhase("idle"); applyState(e.state); break;
-    case "system": add("sys", esc(e.text)); applyState(e.state); break;
-    case "clear": steps = {}; hero(); break;
+    case "approval_done": { const el = $("ap-" + e.id); if (el) el.querySelector(".row").innerHTML = `<span class="${e.ok ? "good" : "bad"}">${e.ok ? "已允许" : "已拒绝"}</span>`; setPhase("think"); break; }
+    case "idle": busy = false; setPhase("idle"); applyState(e.state); loadSessions(); break;
+    case "system": sys(e.text); break;
+    case "clear": live.clear(); applyState(e.state); hero(); loadSessions(); break;
   }
   scroll();
 }
-
 function showApproval(e) {
-  const a = e.args, list = a.paths || (a.path ? [a.path] : null);
-  let detail = list && e.tool === "trash" ? `将移入回收站（可恢复）共 ${list.length} 项：\n` + list.join("\n")
-    : e.tool === "bash" ? a.command : JSON.stringify(a, null, 2);
-  const d = add("approval", `<h3>需要你确认：${esc(e.tool)}</h3><div class="why">${esc(e.reason)}</div><pre>${esc(detail)}</pre>
-    <div class="row"><button class="primary" data-a="1">允许</button><button data-a="0">拒绝</button>${e.can_always ? `<button data-a="2">本次会话都允许 ${esc(e.tool)}</button>` : ""}</div>`);
-  d.id = "ap-" + e.id;
+  const a = e.args, detail = a.command || (a.path ? a.path + (a.content != null ? "\n" + a.content : "") : JSON.stringify(a, null, 2));
+  const d = document.createElement("div"); d.className = "approval"; d.id = "ap-" + e.id;
+  d.innerHTML = `<h3>需要你确认：${esc(e.tool)}</h3><div class="why">${esc(e.reason)}</div><pre>${esc(detail)}</pre>
+    <div class="row"><button class="primary" data-a="1">允许</button><button data-a="0">拒绝</button>${e.can_always ? `<button data-a="2">本会话都允许 ${esc(e.tool)}</button>` : ""}</div>`;
+  log.appendChild(d);
   d.querySelectorAll("button").forEach(b => b.onclick = () => { d.querySelectorAll("button").forEach(x => x.disabled = true);
     api("/api/approve", {id: e.id, ok: b.dataset.a !== "0", always: b.dataset.a === "2"}); });
 }
@@ -197,32 +330,90 @@ function showApproval(e) {
 async function send(text) {
   text = (text ?? $("inp").value).trim();
   if (!text || busy) return;
+  if (viewing) closeHistory();
   $("inp").value = ""; fit();
   const r = await api("/api/chat", {text});
-  if (r.error) add("sys bad", esc(r.error));
+  if (r.error) sys(r.error, "bad");
 }
-function fit() { const t = $("inp"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px"; }
-
+function fit() { const t = $("inp"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 180) + "px"; }
 const stop = () => { api("/api/stop", {}); $("stext").textContent = "正在中断…"; };
 $("send").onclick = () => busy ? stop() : send();
 $("inp").addEventListener("input", fit);
-document.addEventListener("keydown", e => { if (e.key === "Escape" && busy) stop(); });
 $("inp").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
-$("apply").onclick = async () => { const r = await api("/api/config", {workspace: $("ws").value, mode: $("mode").value, model: $("mdl").value}); if (r.error) add("sys bad", esc(r.error)); };
-$("clear").onclick = () => api("/api/clear", {});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && busy && !$("settings").open) stop(); });
+$("o-llm").onchange = () => { [log, hist, $("runs-body")].forEach(b => b.classList.toggle("hide-llm", !$("o-llm").checked)); };
+$("o-think").onchange = () => document.querySelectorAll("details.think").forEach(d => d.open = $("o-think").checked);
+$("new").onclick = async () => { const r = await api("/api/new", {}); if (r.error) sys(r.error, "bad"); closeHistory(); $("side").classList.remove("open"); };
+$("refresh").onclick = () => loadSessions();
+$("side-toggle").onclick = () => $("side").classList.toggle("open");
 
-hero();
-api("/api/state").then(s => { applyState(s); if (s.busy) { busy = true; setPhase("think"); } });
-const es = new EventSource("/api/stream?t=" + T);
-es.onmessage = m => handle(JSON.parse(m.data));
-</script>
-<script>
-// ---------------------------------------------------------------- 跑分页：runs/ 下的 TB2 结果和每个 trial 的时间线
+// 历史会话
+let sessions = [];
+async function loadSessions() {
+  sessions = (await rget("/api/sessions")).sessions || [];
+  $("sessions").innerHTML = sessions.length ? sessions.map(s => `<button class="sess" data-id="${esc(s.id)}">
+    <span class="tt">${esc((s.task || "（空会话）").split("\n")[0])}</span>
+    <span class="mm">${new Date(s.mtime * 1000).toLocaleString([], {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"})} · ${esc(s.status === "end_turn" ? "完成" : s.status === "unfinished" ? "未结束" : s.status || "")} · ${esc((s.model || "").split("/").pop())}</span></button>`).join("")
+    : `<div class="empty">还没有会话</div>`;
+  $("sessions").querySelectorAll(".sess").forEach(b => b.onclick = () => showHistory(b.dataset.id));
+  markSessions();
+}
+function markSessions() {
+  document.querySelectorAll(".sess").forEach(b => { b.classList.toggle("cur", !!state && b.dataset.id === state.session_id); b.classList.toggle("viewing", b.dataset.id === viewing); });
+}
+async function showHistory(id) {
+  $("side").classList.remove("open");
+  if (state && id === state.session_id) return closeHistory();
+  const r = await rget("/api/session", {id});
+  if (r.error) return sys(r.error, "bad");
+  viewing = id; markSessions();
+  log.hidden = true; hist.hidden = false; $("foot").hidden = true;
+  hist.innerHTML = `<div class="histbar">历史会话 <code>${esc(id)}</code>（只读）<span class="grow"></span>
+    <button class="primary" id="h-open">在这个会话里继续</button><button id="h-back">回到当前会话</button></div>`;
+  const tr = Trace(hist, {});
+  r.timeline.forEach(e => tr.add(e));
+  if (!r.timeline.length) hist.insertAdjacentHTML("beforeend", `<div class="empty">这个会话是空的</div>`);
+  $("h-back").onclick = closeHistory;
+  $("h-open").onclick = async () => { const x = await api("/api/open", {id}); closeHistory(); if (x.error) sys(x.error, "bad"); };
+  main.scrollTop = 0;
+}
+function closeHistory() { viewing = null; hist.hidden = true; hist.innerHTML = ""; log.hidden = false; $("foot").hidden = false; markSessions(); scroll(); }
+
+// 设置
+const F = $("sform").elements;
+function sbSync() {
+  const v = F.sb_kind.value;
+  $("sb-arg-wrap").style.display = v === "docker" || v === "container" ? "" : "none";
+  $("sb-arg-label").textContent = v === "docker" ? "镜像" : "容器 id";
+  F.sb_arg.placeholder = v === "docker" ? "python:3.12-slim" : "容器 id 或名字";
+  $("net-wrap").style.display = v ? "" : "none";
+}
+F.sb_kind.onchange = sbSync;
+$("open-settings").onclick = () => {
+  const c = state.config;
+  for (const n of ["model", "max_tokens", "temperature", "workspace", "mcp_config", "mode", "max_turns", "max_context"]) F[n].value = c[n] ?? "";
+  F.native_tools.checked = !!c.native_tools; F.network.checked = !!c.network;
+  F.extra_body.value = c.extra_body && Object.keys(c.extra_body).length ? JSON.stringify(c.extra_body, null, 2) : "";
+  const [kind, ...rest] = (c.sandbox || "").split(":");
+  F.sb_kind.value = kind; F.sb_arg.value = rest.join(":"); sbSync();
+  $("serr").textContent = ""; $("settings").showModal();
+};
+$("sapply").onclick = async ev => {
+  ev.preventDefault();
+  const kind = F.sb_kind.value, arg = F.sb_arg.value.trim();
+  if ((kind === "docker" || kind === "container") && !arg) { $("serr").textContent = kind === "docker" ? "填一个镜像" : "填容器 id"; return; }
+  const cfg = {model: F.model.value, max_tokens: F.max_tokens.value, temperature: F.temperature.value, native_tools: F.native_tools.checked,
+    extra_body: F.extra_body.value, workspace: F.workspace.value, sandbox: kind ? (arg ? kind + ":" + arg : kind) : "",
+    network: F.network.checked, mcp_config: F.mcp_config.value, mode: F.mode.value, max_turns: F.max_turns.value, max_context: F.max_context.value};
+  $("sapply").disabled = true; $("serr").textContent = kind === "docker" ? "正在起容器…" : "";
+  const r = await api("/api/config", {config: cfg});
+  $("sapply").disabled = false;
+  if (r.error) { $("serr").textContent = r.error; return; }
+  $("settings").close(); closeHistory();
+};
+
+// ---------------------------------------------------------------- 跑分页：runs/ 下的 TB2 结果
 const RB = $("runs-body");
-const rget = (p, q) => fetch(p + "?t=" + T + Object.entries(q || {}).map(([k, v]) => "&" + k + "=" + encodeURIComponent(v)).join("")).then(r => r.json());
-const k = n => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
-const usd = x => x == null ? "—" : "$" + (x < 0.01 ? x.toFixed(4) : x.toFixed(3));
-const sec = x => x == null ? "—" : x >= 60 ? Math.floor(x / 60) + "m" + String(Math.round(x % 60)).padStart(2, "0") + "s" : Math.round(x) + "s";
 const OUT = {ok: "通过", fail: "失败", agent_timeout: "超时", infra: "基础设施"};
 const pill = o => `<span class="pill p-${o}">${OUT[o] || o}</span>`;
 const href = (...parts) => "#runs/" + parts.map(encodeURIComponent).join("/");
@@ -230,7 +421,6 @@ const href = (...parts) => "#runs/" + parts.map(encodeURIComponent).join("/");
 function route() {
   const h = location.hash.slice(1) || "chat", parts = h.split("/").map(decodeURIComponent);
   const runs = parts[0] === "runs";
-  document.body.classList.toggle("chat", !runs);
   $("view-chat").classList.toggle("on", !runs); $("view-runs").classList.toggle("on", runs);
   $("nav-chat").classList.toggle("on", !runs); $("nav-runs").classList.toggle("on", runs);
   if (!runs) return scroll();
@@ -243,7 +433,7 @@ window.addEventListener("hashchange", route);
 
 async function showRuns() {
   const {runs} = await rget("/api/runs");
-  if (!runs.length) { RB.innerHTML = `<div class="empty">runs 目录里还没有跑分结果（用 --runs-dir 指定目录）</div>`; return; }
+  if (!runs.length) { RB.innerHTML = `<div class="empty">runs 目录里还没有跑分结果（启动时用 --runs-dir 指定目录）</div>`; return; }
   RB.innerHTML = `<div class="crumbs">全部跑分 · ${runs.length} 次</div>` + runs.map(r => `<a class="card" href="${href(r.name)}">
     <h3>${esc(r.name)}</h3>
     ${r.arms.map(a => `<div class="arm"><b>${esc(a.agent)}</b><span>${esc(a.model || "")}</span>
@@ -260,7 +450,7 @@ async function showRun(name) {
     <td>${esc(x.task)}</td><td>${pill(x.outcome)}${x.exception ? `<span class="tag">${esc(x.exception)}</span>` : ""}</td>
     <td class="num">${sec(x.agent_seconds)}${x.time_budget ? ` / ${sec(x.time_budget)}` : ""}</td>
     <td class="num">${x.turns ?? "—"}</td><td class="num">${k(x.input_tokens)}</td>
-    <td class="num">${x.input_tokens ? Math.round(100 * (x.cache_tokens || 0) / x.input_tokens) + "%" : "—"}</td>
+    <td class="num">${x.input_tokens ? pct(x.cache_tokens, x.input_tokens) : "—"}</td>
     <td class="num">${k(x.output_tokens)}</td><td class="num">${usd(x.cost_usd)}</td>
     <td>${esc(x.agent)}${x.agent === "oracle" ? "" : `<span class="tag">${esc(x.model.split("/").pop())}</span>`}</td></tr>`).join("");
   RB.innerHTML = `<div class="crumbs"><a href="#runs">全部跑分</a> / ${esc(r.name)}</div>
@@ -278,49 +468,32 @@ async function showTrial(run, id) {
   const budget = m.time_budget || start.budget, llm = tl.filter(e => e.kind === "llm");
   const dropped = tl.filter(e => e.kind === "dropped").length, off = llm.filter(e => e.think === false).length;
   const stat = (label, val, extra) => `<div class="stat"><span>${label}</span><b class="big">${val}</b>${extra || ""}</div>`;
-  const results = {}; tl.forEach(e => { if (e.kind === "result") results[e.id] = e; });
   RB.innerHTML = `<div class="crumbs"><a href="#runs">全部跑分</a> / <a href="${href(run)}">${esc(run)}</a> / ${esc(r.task)}</div>
     <div class="stats">
       ${stat("结果", pill(r.outcome))}
-      ${stat("用时 / 时限", `${sec(last)}${budget ? " / " + sec(budget) : ""}`, budget ? `<div class="bar"><i style="width:${Math.min(100, 100 * last / budget)}%"></i></div>` : "")}
-      ${stat("模型调用", llm.length, `<span>模型 ${sec(llm.reduce((s, e) => s + (e.seconds || 0), 0))}</span>`)}
+      ${stat("用时 / 时限", `${sec(last)}${budget ? " / " + sec(budget) : ""}`, budget ? `<div class="progress"><i style="width:${Math.min(100, 100 * last / budget)}%"></i></div>` : "")}
+      ${stat("模型调用", llm.length, `<span>模型共 ${sec(llm.reduce((s, e) => s + (e.seconds || 0), 0))}</span>`)}
       ${stat("截断丢弃 / 关思考重试", `${dropped} / ${off}`)}
-      ${stat("输入 · 缓存", k(ar.n_input_tokens), `<span>缓存 ${ar.n_input_tokens ? Math.round(100 * (ar.n_cache_tokens || 0) / ar.n_input_tokens) : 0}%</span>`)}
+      ${stat("输入", k(ar.n_input_tokens), `<span>缓存 ${pct(ar.n_cache_tokens, ar.n_input_tokens)}</span>`)}
       ${stat("输出", k(ar.n_output_tokens), `<span>思考 ${k(m.reasoning_tokens)}</span>`)}
       ${stat("花费", usd(ar.cost_usd))}
     </div>
     ${r.exception ? `<div class="card"><b class="bad">${esc(r.exception.exception_type || "")}</b><pre>${esc(r.exception.exception_message || "")}</pre></div>` : ""}
     <details class="card"><summary>判分输出</summary><pre>${esc(r.verifier || "（没有）")}</pre></details>
     <details class="card"><summary>agent 参数</summary><pre>${esc(JSON.stringify(r.kwargs, null, 2))}</pre></details>
-    <div class="filters"><label><input type="checkbox" id="f-llm" checked> 显示每次模型调用</label>
-      <label><input type="checkbox" id="f-think"> 展开思考内容</label></div>
+    <div class="filters"><label><input type="checkbox" id="f-llm" checked> 显示每次模型调用</label></div>
     <div class="tl" id="tl">${tl.length ? "" : `<div class="empty">这个 trial 没有 agentrt.jsonl</div>`}</div>`;
-  const draw = () => {
-    const showLLM = $("f-llm").checked, open = $("f-think").checked ? " open" : "";
-    const t = e => `<span class="t">${sec(e.at)}</span>`;
-    $("tl").innerHTML = tl.map(e => {
-      switch (e.kind) {
-        case "start": return `<div class="ev">${t(e)}<b>开始</b> ${esc(e.model || "")}${e.budget ? ` · 时限 ${sec(e.budget)}` : ""}
-          <details><summary>任务描述</summary><pre>${esc(e.task)}</pre></details></div>`;
-        case "llm": return showLLM ? `<div class="ev llm">${t(e)}#${e.serial} 模型 ${(e.seconds || 0).toFixed(1)}s · 输入 ${k(e.prompt)}（缓存 ${e.prompt ? Math.round(100 * (e.cached || 0) / e.prompt) : 0}%）· 输出 ${k(e.completion)}${e.reasoning ? `（思考 ${k(e.reasoning)}）` : ""}
-          ${e.finish === "length" ? `<span class="tag red">截断</span>` : ""}${e.think === false ? `<span class="tag">关思考</span>` : ""}${e.prefix_break != null ? `<span class="tag">缓存断点 ${e.prefix_break}</span>` : ""}</div>` : "";
-        case "assistant": return (e.content.trim() || e.reasoning) ? `<div class="ev">${t(e)}${e.content.trim() ? esc(e.content.trim()) : `<span class="badge">（只有思考）</span>`}
-          ${e.reasoning ? `<details${open}><summary>思考 ${k(e.reasoning.length)} 字符</summary><pre>${esc(e.reasoning)}</pre></details>` : ""}</div>` : "";
-        case "tool": { const res = results[e.id]; let args = e.args; try { const a = JSON.parse(e.args); args = a.command || (a.path ? a.path + (a.content ? "\n" + a.content : "") : e.args); } catch (_) {}
-          return `<div class="ev">${t(e)}<b>${esc(e.name)}</b>${res ? ` <span class="${res.error ? "bad" : "good"}">${res.error ? "出错" : "✓"}</span> <span class="badge">${(res.seconds || 0).toFixed(1)}s</span>` : ` <span class="badge">（没有结果）</span>`}
-            <pre>${esc(args)}</pre>${res ? `<details><summary>${esc(res.content.split("\n").slice(0, 2).join(" ").slice(0, 120))}</summary><pre>${esc(res.content)}</pre></details>` : ""}</div>`; }
-        case "dropped": return `<div class="ev warn">${t(e)}<b>只思考没动作，被截断，已丢弃</b><details${open}><summary>被丢弃的思考</summary><pre>${esc(e.reasoning)}</pre></details></div>`;
-        case "harness": return `<div class="ev warn">${t(e)}<b>harness 提醒</b> ${esc(e.text)}</div>`;
-        case "note": return `<div class="ev warn">${t(e)}${esc(e.text)}</div>`;
-        case "end": return `<div class="ev end">${t(e)}<b>结束：${esc(e.status || "")}</b><pre>${esc(e.final || "（没有最终答复）")}</pre></div>`;
-        default: return "";
-      }
-    }).join("") || $("tl").innerHTML;
-  };
-  if (tl.length) { draw(); $("f-llm").onchange = draw; $("f-think").onchange = draw; }
+  const tr = Trace($("tl"), {task: true});
+  tl.forEach(e => tr.add(e));
+  $("f-llm").onchange = () => $("tl").classList.toggle("hide-llm", !$("f-llm").checked);
 }
 
+// ---------------------------------------------------------------- 启动
+api("/api/state").then(s => { applyState(s); if (!log.children.length) hero(); if (s.busy) { busy = true; setPhase("think"); } });
+loadSessions();
 route();
+const es = new EventSource("/api/stream?t=" + T);
+es.onmessage = m => handle(JSON.parse(m.data));
 </script>
 </body>
 </html>

@@ -15,9 +15,8 @@ from http.server import ThreadingHTTPServer
 def server(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
-    (ws / "a.log").write_text("x")
-    llm = ScriptedLLM(['<tool_call>{"name":"trash","arguments":{"paths":["a.log"]}}</tool_call>', "删好了"])
-    sess = WebSession(llm, ws, "default", tmp_path / "s")
+    llm = ScriptedLLM(['<tool_call>{"name":"write_file","arguments":{"path":"a.txt","content":"hi"}}</tool_call>', "写好了"])
+    sess = WebSession(lambda cfg: llm, tmp_path / "s", {"workspace": str(ws)})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), None)
     port = httpd.server_address[1]
     httpd.RequestHandlerClass = make_handler(sess, "tok", port, _runs(tmp_path / "runs"))
@@ -62,14 +61,14 @@ def call(port, path, body=None, tok="tok"):
     return json.loads(urllib.request.urlopen(req).read())
 
 
-def wait_for(sess, kind, timeout=5):
+def wait_for(sess, kind, timeout=5, item=None):
     end = time.time() + timeout
     while time.time() < end:
         for e in list(sess.events):
-            if e["kind"] == kind:
+            if e["kind"] == kind and (item is None or e.get("item", {}).get("kind") == item):
                 return e
         time.sleep(0.02)
-    raise AssertionError(f"没等到 {kind}: {[e['kind'] for e in sess.events]}")
+    raise AssertionError(f"没等到 {kind}/{item}: {[(e['kind'], e.get('item', {}).get('kind')) for e in sess.events]}")
 
 
 def test_token_required(server):
@@ -79,56 +78,83 @@ def test_token_required(server):
     assert e.value.code == 403
 
 
-def test_trash_requires_approval_then_runs(server):
+def test_write_requires_approval_then_runs(server):
     sess, port, ws = server
-    call(port, "/api/chat", {"text": "删掉 a.log"})
+    call(port, "/api/chat", {"text": "写一个 a.txt"})
     ap = wait_for(sess, "approval")
-    assert ap["tool"] == "trash" and (ws / "a.log").exists()          # 还没批准，文件还在
+    assert ap["tool"] == "write_file" and not (ws / "a.txt").exists()     # 还没批准，文件还没写
     call(port, "/api/approve", {"id": ap["id"], "ok": True})
-    assert wait_for(sess, "final")["text"] == "删好了"
-    import os
-    from pathlib import Path
-    assert not (ws / "a.log").exists() and (Path(os.environ["AGENTRT_TRASH_DIR"]) / "a.log").exists()
+    wait_for(sess, "ev", item="end")
+    assert (ws / "a.txt").read_text() == "hi"
+    kinds = [e["item"]["kind"] for e in sess.events if e["kind"] == "ev"]
+    assert kinds[:2] == ["start", "user"] and "llm" in kinds and "tool" in kinds and "result" in kinds
+    assert [e["item"]["content"] for e in sess.events
+            if e["kind"] == "ev" and e["item"]["kind"] == "assistant" and e["item"]["content"]][-1] == "写好了"
 
 
 def test_denied_keeps_file(server):
     sess, port, ws = server
-    call(port, "/api/chat", {"text": "删掉 a.log"})
+    call(port, "/api/chat", {"text": "写一个 a.txt"})
     ap = wait_for(sess, "approval")
     call(port, "/api/approve", {"id": ap["id"], "ok": False})
-    wait_for(sess, "final")
-    assert (ws / "a.log").exists()
-    assert any(e["kind"] == "result" and e["denied"] for e in sess.events)
+    wait_for(sess, "ev", item="end")
+    assert not (ws / "a.txt").exists()
+    assert any(e["kind"] == "ev" and e["item"]["kind"] == "result" and e["item"]["denied"] for e in sess.events)
 
 
-def test_config_rejects_missing_dir(server):
-    _, port, _ = server
-    with pytest.raises(urllib.error.HTTPError) as e:
-        call(port, "/api/config", {"workspace": "/no/such/dir", "mode": "default"})
-    assert e.value.code == 400
-
-
-def test_web_resume_replays_history(tmp_path):
-    from agentrt.session import EventLog
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    log = EventLog.new(tmp_path / "s")
-    s1 = WebSession(ScriptedLLM(["第一轮答复"]), ws, "default", tmp_path / "s")
-    s1.agent.log = log
-    s1.agent._chat_started = False
-    s1.agent.send("你好")
-    s2 = WebSession(ScriptedLLM([]), ws, "default", tmp_path / "s2", resume=log.path)
-    kinds = [e["kind"] for e in s2.events]
-    assert "user" in kinds and "final" in kinds and not s2.busy
-    assert next(e for e in s2.events if e["kind"] == "final")["text"] == "第一轮答复"
-
-
-def test_config_switches_model(server):
+def test_config_rejects_bad_settings(server):
     sess, port, ws = server
-    call(port, "/api/config", {"workspace": str(ws), "mode": "default", "model": "qwen/qwen3.7-flash"})
-    assert sess.llm.model == "qwen/qwen3.7-flash" and call(port, "/api/state")["model"] == "qwen/qwen3.7-flash"
-    with pytest.raises(urllib.error.HTTPError):
-        call(port, "/api/config", {"workspace": str(ws), "mode": "default", "model": "two words"})
+    for bad in ({"workspace": "/no/such/dir"}, {"mode": "yolo"}, {"sandbox": "vm:x"}, {"extra_body": "[1]"},
+                {"model": "two words"}, {"max_tokens": 0}, {"mcp_config": "/no/such.json"}):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            call(port, "/api/config", {"config": bad})
+        assert e.value.code == 400, bad
+    assert sess.config["workspace"] == str(ws.resolve())
+
+
+def test_config_starts_new_session(server):
+    sess, port, ws = server
+    old = sess.agent.log.session_id
+    call(port, "/api/config", {"config": {"model": "qwen/qwen3.7-flash", "mode": "auto", "max_turns": 7,
+                                          "extra_body": '{"provider": {"order": ["wafer/us"]}}'}})
+    st = call(port, "/api/state")
+    assert st["session_id"] != old and st["config"]["mode"] == "auto" and sess.agent.max_turns == 7
+    assert st["config"]["extra_body"] == {"provider": {"order": ["wafer/us"]}}
+    assert st["config"]["model"] == "scripted"      # 页面显示的是 LLM 实际用的模型 id
+    assert sess.events[-1]["kind"] == "clear"
+
+
+def test_sandbox_toolset(server):
+    sess, port, ws = server
+    call(port, "/api/config", {"config": {"sandbox": "local"}})
+    st = call(port, "/api/state")
+    assert st["config"]["sandbox"] == "local" and st["sandbox"] and "edit_file" in st["tools"]
+    assert sess.agent.sandbox is not None and "通用 agent" in sess.agent.system
+
+
+def test_sessions_list_and_open(server):
+    sess, port, ws = server
+    call(port, "/api/chat", {"text": "写一个 a.txt"})
+    call(port, "/api/approve", {"id": wait_for(sess, "approval")["id"], "ok": True})
+    wait_for(sess, "ev", item="end")
+    sid = sess.agent.log.session_id
+    while sess.busy:
+        time.sleep(0.02)
+    [row] = [s for s in call(port, "/api/sessions")["sessions"] if s["id"] == sid]
+    assert row["task"] == "写一个 a.txt" and row["status"] == "end_turn"
+    detail = call(port, "/api/session?id=" + sid)
+    assert [e["kind"] for e in detail["timeline"]][:2] == ["start", "user"]
+    call(port, "/api/new", {})
+    assert sess.agent.log.session_id != sid
+    call(port, "/api/open", {"id": sid})
+    assert sess.agent.log.session_id == sid and len(sess.agent._live) > 2   # 上下文从日志重建
+    replayed = [e for e in sess.events[sess._since:] if e["kind"] == "ev"]
+    assert replayed and all(e.get("replay") for e in replayed) and any(e["item"]["kind"] == "user" for e in replayed)
+    for bad in ("../x", "nope"):
+        with pytest.raises(urllib.error.HTTPError):
+            call(port, "/api/open", {"id": bad})
+        with pytest.raises(urllib.error.HTTPError):
+            call(port, "/api/session?id=" + bad)
 
 
 def test_runs_pages(server):

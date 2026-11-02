@@ -262,6 +262,33 @@ python3 -m evals.run_evals --resume evals_out/<时间>                      # �
 | 改前必读 | 未读 / 读后被改的文件拒绝写入（内容哈希） | FileEditTool / FileWriteTool：readFileState + mtime | 对应 |
 | skills / 流式 | — | `SkillTool`、流式 | 没有 |
 
+## 网页控制台
+
+浏览器里用 agentrt：和通用 agent 多轮对话，实时看它每一步在干什么，翻历史会话，浏览跑分。只监听 127.0.0.1，启动时生成随机 token。
+
+```bash
+python3 -m agentrt web                                           # 当前目录、本地工具、OpenRouter
+python3 -m agentrt web --workspace <目录> --model deepseek/deepseek-v4.1-flash --sandbox docker:python:3.12-slim
+python3 -m agentrt web --base-url http://127.0.0.1:8000/v1       # 任意 OpenAI 兼容端点（vLLM 等）
+python3 -m agentrt web --resume <会话id>                         # 打开时接着这个会话
+python3 -m agentrt web --runs-dir <目录>                         # “跑分”页读的目录，默认仓库里的 runs/
+```
+
+- **会话**：
+  - 页面上的“设置”能改 agent 的组装，应用后开一个新会话：
+    - 模型：模型 id、max_tokens、temperature、native / 文本工具协议、请求体附加字段（比如 OpenRouter 的 `provider`、`reasoning`）；
+    - 工具集：本地工具（`list_dir` `read_file` `grep` `write_file` `edit_file` `bash` `todo_write`），或者 sandbox 工具集（local / bwrap / Docker 新容器 / 已有容器）；
+    - 权限模式（plan / default / auto / bypass）、每轮最多几次模型调用、上下文上限、MCP 配置文件。
+  - 对话里实时显示：
+    - 每次模型调用：耗时、输入 tokens、缓存命中、输出和思考 tokens、截断、关思考；
+    - 思考内容、工具调用和结果、被丢弃的回复、上下文压缩；
+    - 需要确认的调用会弹卡片，10 分钟不点视为拒绝；Esc 可以中断。
+  - 左边列出 `~/.agentrt/sessions` 里的历史会话（命令行 `run` 的也在）。点开是只读回放，“在这个会话里继续”会用当前设置从日志重建上下文，接着对话。
+- **跑分**：只读浏览 `run_tb2.sh` 的输出，分三层：
+  - 每次跑分：通过数和花费；
+  - 每个 trial：结果、用时 / 时限、tokens；
+  - 单个 trial 的时间线：和会话页是同一套展示，再加判分输出。
+
 ## 文件助手
 
 基于同一运行时的一个应用：用自然语言搜索、统计、整理本地文件，走 OpenRouter。key 读 `OPENROUTER_API_KEY` 或 `~/.openrouter_key`；模型依次取 `--model` → `AGENTRT_MODEL` → `OPENROUTER_MODEL`。
@@ -269,18 +296,10 @@ python3 -m evals.run_evals --resume evals_out/<时间>                      # �
 ```bash
 python3 -m agentrt assistant --workspace <目录>                 # 终端交互，改动前确认
 python3 -m agentrt assistant --workspace <目录> --mode plan     # 只读
-python3 -m agentrt web --workspace <目录>                       # 网页界面（127.0.0.1 + 随机 token）
-python3 -m agentrt web --resume <会话id>                        # 崩溃后接着干
-python3 -m agentrt web --runs-dir <目录>                        # “跑分”页读的目录，默认仓库里的 runs/
 ```
-
-网页顶上有两页：**对话**（文件助手；工作范围、权限模式、模型都能在页面上改）和**跑分**（只读浏览 `run_tb2.sh`
-的输出：每次跑分的通过数和花费 → 每个 trial 的结果、用时 / 时限、tokens → 单个 trial 的时间线，包括每次模型调用、
-工具调用和输出、被截断丢弃的思考、关思考重试、时间提醒、判分输出）。
 
 - **工具**：只读的有 `list_dir` `find_files` `file_stats` `grep` `read_file` `find_duplicates`；会改动文件的有 `move_file` `copy_file` `trash`；另有 `delegate`（只读子 agent）和沙箱 bash。
 - **没有永久删除**：`trash` 放进系统废纸篓，`AGENTRT_TRASH_DIR` 可改为指定目录；move / copy 不覆盖已有文件。
-- **网页版**：每个改动先弹确认卡片，10 分钟不点视为拒绝；Esc 可以中断。
 - **沙箱 bash**：只在专用工具做不到时用，跑在 macOS `sandbox-exec` 里。断网；只能写工作目录和临时目录；工作目录内禁止 unlink（删除只能走 `trash`）；读不到主目录里工作目录以外的内容。
   - 只读命令（白名单、无重定向和命令替换）自动放行，并换一份禁止任何写入的更严配置执行；其余命令要确认。
   - 没有 `sandbox-exec` 时 bash 不提供（失败即关闭）。

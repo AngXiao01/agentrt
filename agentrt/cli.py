@@ -4,7 +4,7 @@
     python -m agentrt run    "任务描述" --workspace ./ws [--mode auto] [--approve cli]
     python -m agentrt run    "任务描述" --workspace ./ws --sandbox docker:python:3.12-slim   # coding 工具集 + 容器
     python -m agentrt assistant [--workspace ~/Downloads] [--once "请求"]
-    python -m agentrt web [--workspace ~/Downloads] [--port 8765]
+    python -m agentrt web [--workspace .] [--model ...] [--sandbox docker:python:3.12-slim] [--port 8765]
     python -m agentrt resume <session_id 或 jsonl 路径>
     python -m agentrt trace  <session_id 或 jsonl 路径> [--timeline]
     python -m agentrt sessions
@@ -170,12 +170,21 @@ def cmd_assistant(a) -> None:
 
 
 def cmd_web(a) -> None:
-    from .openrouter import OpenRouterLLM
     from .web import serve
-    llm = OpenRouterLLM(a.model, temperature=a.temperature, max_tokens=a.max_tokens, max_retries=a.retries)
-    resume = _session_path(a.resume, a.sessions_dir) if a.resume else None
-    serve(llm, Path(a.workspace).expanduser().resolve(), a.mode, a.sessions_dir, port=a.port,
-          open_browser=not a.no_open, resume=resume, bash=not a.no_bash,
+
+    def make_llm(cfg: dict):
+        kw = dict(temperature=cfg["temperature"], max_tokens=cfg["max_tokens"], max_retries=a.retries,
+                  native_tools=cfg["native_tools"], extra_body=cfg["extra_body"] or None)
+        if a.base_url:   # 任意 OpenAI 兼容端点（vLLM 等）；不给就走 OpenRouter
+            return OpenAICompatLLM(a.base_url, model=cfg["model"] or None, api_key=api_key(), **kw)
+        from .openrouter import OpenRouterLLM
+        return OpenRouterLLM(cfg["model"] or a.model, **kw)
+
+    config = {"workspace": a.workspace, "mode": a.mode, "model": a.model or "", "max_tokens": a.max_tokens,
+              "temperature": a.temperature, "native_tools": not a.text_tools,
+              "extra_body": a.extra_body or {}, "sandbox": a.sandbox or "", "network": a.network,
+              "max_turns": a.max_turns, "max_context": a.max_context, "mcp_config": a.mcp_config or ""}
+    serve(make_llm, a.sessions_dir, config, port=a.port, open_browser=not a.no_open, resume=a.resume,
           runs_dir=Path(a.runs_dir).expanduser().resolve())
 
 
@@ -281,17 +290,24 @@ def main(argv=None) -> None:
     agent_opts(sp)
     sp.set_defaults(fn=cmd_assistant)
 
-    sp = sub.add_parser("web", help="网页界面：文件助手对话 + 跑分浏览（OpenRouter）")
-    sp.add_argument("--workspace", default="~", help="初始工作范围，网页里可以改")
+    sp = sub.add_parser("web", help="网页控制台：和通用 agent 对话、看实时轨迹和历史会话、浏览跑分")
+    sp.add_argument("--workspace", default=".", help="初始工作目录，网页里可以改")
     sp.add_argument("--mode", choices=MODES, default="default")
     sp.add_argument("--port", type=int, default=8765)
     sp.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
-    sp.add_argument("--resume", metavar="会话", help="从会话日志恢复（崩溃后接着干）")
-    sp.add_argument("--model", default=None)
-    sp.add_argument("--temperature", type=float, default=0.2)
-    sp.add_argument("--max-tokens", type=int, default=2048)
-    sp.add_argument("--retries", type=int, default=3)
-    sp.add_argument("--no-bash", action="store_true")
+    sp.add_argument("--resume", metavar="会话", help="打开时接着这个会话（会话 id）")
+    sp.add_argument("--base-url", default=None, help="OpenAI 兼容端点；不给就走 OpenRouter")
+    sp.add_argument("--model", default=None, help="默认取 AGENTRT_MODEL / OPENROUTER_MODEL")
+    sp.add_argument("--temperature", type=float, default=0.6)
+    sp.add_argument("--max-tokens", type=int, default=16000)
+    sp.add_argument("--retries", type=int, default=4)
+    sp.add_argument("--text-tools", action="store_true", help="用文本协议调工具（默认走 native function calling）")
+    sp.add_argument("--extra-body", type=json.loads, default=None, help='合并进请求体的 JSON，如 \'{"provider": ...}\'')
+    sp.add_argument("--sandbox", default=None, help="local / bwrap / docker:<镜像> / container:<id>；不给就用本地工具")
+    sp.add_argument("--network", action="store_true", help="sandbox 允许联网")
+    sp.add_argument("--max-turns", type=int, default=100)
+    sp.add_argument("--max-context", type=int, default=100000)
+    sp.add_argument("--mcp-config", default=None, help="MCP 配置文件（含 mcpServers）")
     sp.add_argument("--runs-dir", default=str(Path(__file__).resolve().parents[1] / "runs"),
                     help="“跑分”页读的目录（run_tb2.sh 的输出），默认仓库里的 runs/")
     sp.set_defaults(fn=cmd_web)
