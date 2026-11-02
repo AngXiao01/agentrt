@@ -431,6 +431,55 @@ def test_truncated_empty_reply_is_not_end_turn(make_agent):
     res = agent.run("x")
     assert res.status == "end_turn" and res.final == "完成" and res.turns == 3
     assert any("长度上限" in (m.get("content") or "") for m in llm.calls[1])
+    # 端点关不了思考：只能提示；半截思考不进上下文
+    assert llm.thinks == [True, True, True]
+    assert not any(m.get("reasoning") for m in llm.calls[2])
+
+
+def test_thinking_only_truncation_retries_with_thinking_off(make_agent):
+    cut = {"content": "", "reasoning": "想了很久", "finish_reason": "length"}
+    llm = ScriptedLLM([cut, "完成"], think_off={"reasoning": {"enabled": False}})
+    agent, _, ws, log = make_agent(None, llm=llm)
+    res = agent.run("x")
+    assert res.status == "end_turn" and res.final == "完成" and res.turns == 2
+    assert llm.thinks == [True, False]
+    assert llm.calls[1] == llm.calls[0]   # 同样的上下文：没有半截回复，也没有提示
+    assert res.cache_breaks == 0          # 第二次请求仍以第一次为前缀
+    events = log.events()
+    dropped = [e for e in events if e["type"] == "dropped_reply"]
+    assert len(dropped) == 1 and dropped[0]["reasoning"] == "想了很久"
+    assert [e.get("think", True) for e in events if e["type"] == "span"] == [True, False]
+    st = ReplayState(events)
+    assert st.turns == 2 and not any(m.get("reasoning") for m in st.messages)
+
+
+def test_truncation_count_resets_after_tool_calls(make_agent):
+    cut = {"content": "", "finish_reason": "length"}
+    steps = []
+    for i in range(4):
+        steps += [cut, call("list_dir", path=f"d{i}")]
+    agent, llm, ws, log = make_agent(steps + ["完成"], mode="bypass")
+    res = agent.run("x")
+    assert res.status == "end_turn"   # 4 次截断，但不连续
+
+
+def test_wrapup_notice_once_at_80_percent(make_agent, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr("agentrt.loop.time.time", lambda: now[0])
+
+    def at(t, reply):
+        def step(messages):
+            now[0] = t
+            return reply
+        return step
+
+    agent, llm, ws, log = make_agent([at(1050, call("list_dir", path="a")), at(1085, call("list_dir", path="b")),
+                                      call("list_dir", path="c"), "完成"], mode="bypass", deadline=1100.0)
+    res = agent.run("x")
+    assert res.status == "end_turn"
+    notes = [[m for m in c if "时间提醒" in (m.get("content") or "")] for c in llm.calls]
+    assert [len(n) for n in notes] == [0, 0, 1, 1]
+    assert "还剩约 15 秒" in notes[2][0]["content"] and notes[2][0]["kind"] == "harness"
 
 
 def test_truncated_forever_gives_up_as_truncated(make_agent):

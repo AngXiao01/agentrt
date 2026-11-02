@@ -183,7 +183,12 @@ class OpenAICompatLLM:
                  timeout: float = 180, max_retries: int = 4, native_tools: bool = False,
                  merge_system: bool = False, temperature: float = 0.2, max_tokens: int = 2048,
                  sleep: Callable[[float], None] = time.sleep, reasoning_replay: str = "turn",
-                 extra_body: Optional[dict] = None, max_backoff: float = 30.0):
+                 extra_body: Optional[dict] = None, max_backoff: float = 30.0,
+                 think_off: Optional[dict] = None, deadline: Optional[float] = None,
+                 clock: Callable[[], float] = time.time):
+        """think_off：单次关掉思考时并进请求体的字段（同名覆盖 extra_body），如 OpenRouter 的
+        {"reasoning": {"enabled": False}}；None 表示这个端点没法单次关思考。
+        deadline：任务的绝对截止时间（epoch 秒），用来给单次请求的超时封顶，见 _timeout。"""
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -198,6 +203,9 @@ class OpenAICompatLLM:
             raise ValueError(f"reasoning_replay 必须是 {REASONING_REPLAY}")
         self.reasoning_replay = reasoning_replay
         self.extra_body = dict(extra_body or {})   # 例如 {"thinking": {"type": "enabled"}}、{"chat_template_kwargs": {...}}
+        self.think_off = dict(think_off) if think_off else None
+        self.deadline = deadline
+        self._clock = clock
         self.max_model_len: Optional[int] = None
         self.model = self._resolve_model(model)
 
@@ -207,7 +215,7 @@ class OpenAICompatLLM:
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {self.api_key}"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=self._timeout()) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="ignore")
@@ -221,6 +229,13 @@ class OpenAICompatLLM:
             raise RetryableError(f"{type(e).__name__}: {e}") from e
         except json.JSONDecodeError as e:   # 响应体被截断
             raise RetryableError(f"响应不是合法 JSON：{e}") from e
+
+    def _timeout(self) -> float:
+        """单次请求的超时。有截止时间时最多等剩余时间的一半、至少 60 秒（对照 Hermes 的 cap_to_run_budget）：
+        一次卡住的请求不会吃掉整个时限，到点前的收尾提示也还来得及发出去。"""
+        if self.deadline is None:
+            return self.timeout
+        return min(self.timeout, max(60.0, (self.deadline - self._clock()) / 2))
 
     def _with_retry(self, fn):
         """指数退避 + 抖动；只重试 RetryableError。"""
@@ -259,12 +274,14 @@ class OpenAICompatLLM:
     def params(self) -> dict:
         return {"model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens,
                 "native_tools": self.native_tools, "merge_system": self.merge_system,
-                "reasoning_replay": self.reasoning_replay, "extra_body": self.extra_body}
+                "reasoning_replay": self.reasoning_replay, "extra_body": self.extra_body,
+                "think_off": self.think_off}
 
     def chat(self, messages: list[dict], tools_schema: Optional[list[dict]] = None,
-             call_prefix: str = "c") -> ChatResult:
+             call_prefix: str = "c", think: bool = True) -> ChatResult:
+        """think=False：这一次请求关掉思考（并进 think_off；没配 think_off 时照常请求）。"""
         payload = {"model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens,
-                   **self.extra_body, "messages": self.wire(messages)}
+                   **self.extra_body, **({} if think else self.think_off or {}), "messages": self.wire(messages)}
         if self.native_tools and tools_schema:
             payload["tools"] = tools_schema
             payload["tool_choice"] = "auto"
@@ -301,20 +318,24 @@ class OpenAICompatLLM:
 class ScriptedLLM:
     """按顺序返回预设回复。每一步可以是字符串、{"content", "reasoning"}、异常实例，或 callable(messages)->上述之一。"""
 
-    def __init__(self, steps: list, native_tools: bool = False, reasoning_replay: str = "turn"):
+    def __init__(self, steps: list, native_tools: bool = False, reasoning_replay: str = "turn",
+                 think_off: Optional[dict] = None):
         self.steps = list(steps)
         self.calls: list[list[dict]] = []
         self.wires: list[list[dict]] = []
+        self.thinks: list[bool] = []   # 每次调用是否开着思考
         self.native_tools = native_tools
         self.reasoning_replay = reasoning_replay
+        self.think_off = think_off
         self.model = "scripted"
 
     def wire(self, messages):
         return to_wire(messages, self.native_tools, False, self.reasoning_replay)
 
-    def chat(self, messages, tools_schema=None, call_prefix: str = "c") -> ChatResult:
+    def chat(self, messages, tools_schema=None, call_prefix: str = "c", think: bool = True) -> ChatResult:
         self.calls.append([dict(m) for m in messages])
         self.wires.append(self.wire(messages))
+        self.thinks.append(think)
         if not self.steps:
             return ChatResult(content="（脚本已结束）")
         step = self.steps.pop(0)

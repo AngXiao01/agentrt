@@ -86,11 +86,19 @@ class ContextManager:
         self.compactions = 0
         self.last_summary_usage: Optional[dict] = None   # 主循环取走后清空，用来给摘要调用记账
         self._anchor: Optional[tuple[int, int]] = None   # (到这条为止的消息数, 此时服务端报告的上下文 tokens)
+        self._request_anchor: Optional[tuple[int, int]] = None   # 同一次调用、不含回复的锚点（见 drop_reply）
 
     def note_usage(self, n_messages_sent: int, prompt_tokens: int, completion_tokens: int) -> None:
         """记下一次模型调用的真实用量：发出 n 条消息，返回后上下文 = prompt + completion，对应前 n+1 条消息。"""
         if prompt_tokens:
             self._anchor = (n_messages_sent + 1, prompt_tokens + completion_tokens)
+            self._request_anchor = (n_messages_sent, prompt_tokens)
+
+    def drop_reply(self) -> None:
+        """主循环没把刚生成的回复放进上下文（被截断、只有思考）：锚点退回到只算请求本身，
+        否则那几万 token 的思考会一直算在上下文里，提前触发压缩。"""
+        if self._anchor:
+            self._anchor = self._request_anchor
 
     def estimate(self, messages: list[dict]) -> int:
         """按真正发出去的消息粗估：内部消息里存着每一轮的 reasoning，但按 reasoning_replay 大多不回传，直接数会高估好几倍。"""

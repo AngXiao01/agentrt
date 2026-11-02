@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from agentrt.bench.harbor_agent import HarborSandbox, _resolve_model
+from agentrt.bench.harbor_agent import HarborSandbox, _agent_timeout, _resolve_model, _think_off
 from agentrt.coding_tools import build_coding_agent
 from agentrt.llm import ScriptedLLM
 from agentrt.session import EventLog
@@ -86,6 +86,45 @@ def test_resolve_model():
     assert _resolve_model("openai/x", "http://h/v1", "y") == ("http://h/v1", "y")
     with pytest.raises(ValueError):
         _resolve_model("unknownvendor/m", None, None)
+
+
+def _harbor_trial(tmp_path, task_toml, **cfg):
+    task = tmp_path / "tasks" / "t"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text(task_toml)
+    trial = tmp_path / "jobs" / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "config.json").write_text(json.dumps({"task": {"path": str(task)}, **cfg}))
+    return trial / "agent"
+
+
+TASK_TOML = """[task]
+name = "x"
+[verifier]
+timeout_sec = 1200.0
+
+[agent]
+timeout_sec = 900.0   # 注释
+[environment]
+cpus = 1
+"""
+
+
+def test_agent_timeout_follows_harbor(tmp_path):
+    assert _agent_timeout(_harbor_trial(tmp_path / "a", TASK_TOML)) == 900          # 不是 [verifier] 的 1200
+    assert _agent_timeout(_harbor_trial(tmp_path / "b", TASK_TOML, timeout_multiplier=2)) == 1800
+    assert _agent_timeout(_harbor_trial(tmp_path / "c", TASK_TOML, timeout_multiplier=2, agent_timeout_multiplier=0.5)) == 450
+    assert _agent_timeout(_harbor_trial(tmp_path / "d", TASK_TOML,
+                                 agent={"override_timeout_sec": 300, "max_timeout_sec": 200})) == 200
+    assert _agent_timeout(_harbor_trial(tmp_path / "e", "[agent]\nname = 'no timeout'\n")) is None
+    assert _agent_timeout(tmp_path / "nowhere" / "agent") is None
+
+
+def test_think_off_defaults():
+    assert _think_off({}, "https://openrouter.ai/api/v1") == {"reasoning": {"enabled": False}}
+    assert _think_off({}, "https://api.deepseek.com/v1") is None
+    assert _think_off({"think_off": None}, "https://openrouter.ai/api/v1") is None
+    assert _think_off({"think_off": '{"thinking": {"type": "disabled"}}'}, "x") == {"thinking": {"type": "disabled"}}
 
 
 # ---------------------------------------------------------------- 统计

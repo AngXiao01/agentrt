@@ -15,7 +15,12 @@ Harbor 是 Terminal-Bench 2.0 的官方运行框架。外部 agent（BaseAgent�
 
 --ak 参数（都可选）：api_base、model_id、max_turns、max_tokens、max_context、temperature、native_tools、
 reasoning_replay（none / turn / all）、extra_body（JSON）、price（JSON：每百万 tokens 美元 {"input","cached","output"}）、
-bash_timeout、request_timeout。
+bash_timeout、request_timeout、
+think_off（JSON：只有思考就被截断时，下一次请求单次关思考要并进请求体的字段；OpenRouter 默认
+{"reasoning": {"enabled": false}}，其他端点默认不关；null 表示不关，退回到提示“少想一点”）、
+time_budget（秒：agent 时限；默认按 Harbor 的算法从 trial 配置推出来，0 表示不设）。
+
+有时限时：用掉 80% 提醒模型收尾；单次模型请求最多等剩余时间的一半（至少 60 秒）。
 
 只在装了 harbor 的环境里 import 这个模块；HarborSandbox 本身不依赖 harbor，便于测试。
 """
@@ -25,12 +30,14 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shlex
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..openrouter import THINK_OFF as OPENROUTER_THINK_OFF
 from ..sandboxes import _WRAP, ExecResult, SandboxError, _ExecFs
 
 PROVIDERS = {   # -m 的前缀 → 默认端点。模型 id 取前缀之后的部分（openrouter 保留厂商前缀）
@@ -124,6 +131,48 @@ def _resolve_model(model_name: str, api_base: Optional[str], model_id: Optional[
     return base, model_id or (rest if rest else model_name)
 
 
+def _json_opt(v):
+    """--ak 的值：Harbor 能解析成 JSON 的已经解析过了，剩下的字符串再试一次。"""
+    return json.loads(v) if isinstance(v, str) else v
+
+
+def _think_off(opts: dict, base: str) -> Optional[dict]:
+    if "think_off" in opts:
+        return _json_opt(opts["think_off"]) or None
+    return OPENROUTER_THINK_OFF if "openrouter.ai" in base else None
+
+
+def _toml_number(text: str, section: str, key: str) -> Optional[float]:
+    """task.toml 里某一节的一个数值。只为这一个字段，不引入 TOML 解析器（tomllib 要 3.11）。"""
+    current = None
+    for line in text.splitlines():
+        s = line.split("#", 1)[0].strip()
+        if s.startswith("["):
+            current = s.strip("[]").strip()
+        elif current == section and (m := re.fullmatch(rf"{key}\s*=\s*([0-9.eE+-]+)", s)):
+            return float(m.group(1))
+    return None
+
+
+def _agent_timeout(logs_dir) -> Optional[float]:
+    """这个 trial 的 agent 时限（秒），读不到返回 None。Harbor 不把时限告诉 agent，这里照它的算法
+    （Trial._compute_agent_timeout_sec）重算：min(override_timeout_sec 或 task.toml 的 [agent].timeout_sec,
+    max_timeout_sec) × (agent_timeout_multiplier 或 timeout_multiplier)。
+    trial 目录（logs_dir 的上一级）里的 config.json 在 agent 启动前就写好了，只写非默认值；task.path 相对 harbor 的工作目录。"""
+    try:
+        cfg = json.loads((Path(logs_dir).parent / "config.json").read_text())
+        agent = cfg.get("agent") or {}
+        base = agent.get("override_timeout_sec") or _toml_number(
+            (Path(cfg["task"]["path"]) / "task.toml").read_text(), "agent", "timeout_sec")
+        if not base:
+            return None
+        mult = cfg.get("agent_timeout_multiplier")
+        mult = cfg.get("timeout_multiplier", 1.0) if mult is None else mult
+        return min(float(base), float(agent.get("max_timeout_sec") or "inf")) * float(mult)
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+
+
 try:
     from harbor.agents.base import BaseAgent
     from harbor.environments.base import BaseEnvironment
@@ -135,7 +184,8 @@ except ImportError:   # 没装 harbor：只有 HarborSandbox / _resolve_model �
 if BaseAgent is not None:
     class AgentRT(BaseAgent):
         OPTION_KEYS = ("api_base", "model_id", "max_turns", "max_tokens", "max_retries", "max_context", "temperature",
-                       "native_tools", "reasoning_replay", "extra_body", "price", "bash_timeout", "request_timeout")
+                       "native_tools", "reasoning_replay", "extra_body", "price", "bash_timeout", "request_timeout",
+                       "think_off", "time_budget")
 
         def __init__(self, logs_dir, model_name=None, logger=None, *args, **kwargs):
             self.opts = {k: kwargs.pop(k) for k in list(kwargs) if k in self.OPTION_KEYS}
@@ -152,7 +202,7 @@ if BaseAgent is not None:
         async def setup(self, environment: BaseEnvironment) -> None:
             return None   # 外部 agent：不往容器里装任何东西
 
-        def _llm(self):
+        def _llm(self, deadline: Optional[float]):
             from agentrt.llm import OpenAICompatLLM
 
             class _Direct(OpenAICompatLLM):
@@ -162,12 +212,11 @@ if BaseAgent is not None:
             o = self.opts
             base, mid = _resolve_model(self.model_name or "", o.get("api_base"), o.get("model_id"))
             key = next((v for v in (self._get_env(k) for k in KEY_ENVS) if v), None) or _key_from_file()
-            extra = o.get("extra_body")
             return _Direct(base, model=mid, api_key=key, native_tools=bool(o.get("native_tools", True)),
                            temperature=float(o.get("temperature", 0.6)), max_tokens=int(o.get("max_tokens", 32768)),
                            timeout=float(o.get("request_timeout", 600)), max_retries=int(o.get("max_retries", 10)), max_backoff=60.0,
                            reasoning_replay=str(o.get("reasoning_replay", "turn")),
-                           extra_body=json.loads(extra) if isinstance(extra, str) else extra)
+                           extra_body=_json_opt(o.get("extra_body")), think_off=_think_off(o, base), deadline=deadline)
 
         async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
             from agentrt.coding_tools import build_coding_agent
@@ -175,11 +224,14 @@ if BaseAgent is not None:
             from agentrt.session import EventLog
 
             o = self.opts
+            started = time.time()   # Harbor 的计时从调用 run() 开始（asyncio.wait_for）
+            budget = float(o["time_budget"]) if "time_budget" in o else _agent_timeout(self.logs_dir)
+            deadline = started + budget if budget else None
             loop = asyncio.get_running_loop()
             pwd = await environment.exec("pwd", timeout_sec=30)
             workdir = (pwd.stdout or "/").strip().splitlines()[-1] if pwd.return_code == 0 else "/"
             sandbox = HarborSandbox(environment, loop, workdir)
-            llm = self._llm()
+            llm = self._llm(deadline)
             logs = Path(self.logs_dir)
             logs.mkdir(parents=True, exist_ok=True)
             log = EventLog(logs / "agentrt.jsonl")
@@ -189,7 +241,7 @@ if BaseAgent is not None:
                 context=ContextManager(llm, max_context_tokens=int(o.get("max_context", 100_000)),
                                        tool_result_max_chars=16_000),
                 price=json.loads(price) if isinstance(price, str) else price,
-                bash_timeout=float(o.get("bash_timeout", 180)), harness_dir=logs / "harness")
+                bash_timeout=float(o.get("bash_timeout", 180)), harness_dir=logs / "harness", deadline=deadline)
             try:
                 await asyncio.to_thread(agent.run, instruction)
             except asyncio.CancelledError:   # Harbor 的 agent 超时：让主循环在下一个检查点停下，别在后台继续烧 token
@@ -205,4 +257,5 @@ if BaseAgent is not None:
                                     "tool_errors": r.tool_errors, "parse_errors": r.parse_errors,
                                     "compactions": r.compactions, "cache_breaks": r.cache_breaks,
                                     "reasoning_tokens": r.reasoning_tokens, "llm_seconds": round(r.llm_seconds, 1),
-                                    "tool_seconds": round(r.tool_seconds, 1), "session_log": str(log.path)}
+                                    "tool_seconds": round(r.tool_seconds, 1), "time_budget": budget,
+                                    "session_log": str(log.path)}

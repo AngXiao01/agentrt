@@ -96,6 +96,8 @@ class ReplayState:
                 self.messages.append(e["message"])
                 if e["message"]["role"] == "assistant":
                     self.turns += 1
+            elif t == "dropped_reply":
+                self.turns += 1   # 没进上下文的回复也用掉了一个调用序号；call id 按序号生成，恢复后不能重复
             elif t == "tool_start":
                 self.started[e["call_id"]] = e
             elif t == "tool_proc":

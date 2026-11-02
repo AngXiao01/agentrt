@@ -357,7 +357,8 @@ def coding_prompt(sandbox: Sandbox) -> dict:
 
 def build_coding_agent(llm, sandbox: Sandbox, log, *, max_turns: int = 100, context=None, permissions=None,
                        approver=None, price: Optional[dict] = None, on_event=None, bash_timeout: float = 120.0,
-                       volatile_prefix: bool = False, harness_dir=None, extra_tools: Optional[list] = None):
+                       volatile_prefix: bool = False, harness_dir=None, extra_tools: Optional[list] = None,
+                       deadline: Optional[float] = None):
     """无人值守的编码 agent：coding_tools + 英文 system prompt + 按 sandbox 决定权限。
 
     权限：一次性容器里用 bypass + 不挂 hook——爆炸半径就是容器，hook 的启发式只会误伤（比如任务本身要求写
@@ -377,4 +378,4 @@ def build_coding_agent(llm, sandbox: Sandbox, log, *, max_turns: int = 100, cont
     return Agent(llm, ws, log, tools=coding_tools() + list(extra_tools or []), permissions=permissions,
                  approver=approver or policy_approver, context=context or ContextManager(llm),
                  max_turns=max_turns, bash_timeout=bash_timeout, volatile_prefix=volatile_prefix,
-                 on_event=on_event, sandbox=sandbox, prompt=coding_prompt(sandbox), price=price)
+                 on_event=on_event, sandbox=sandbox, prompt=coding_prompt(sandbox), price=price, deadline=deadline)
