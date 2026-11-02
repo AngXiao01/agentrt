@@ -192,3 +192,13 @@ def test_tb2_stratified_subset(tmp_path):
     diffs = [("easy" if int(p[1:]) < 2 else "medium" if int(p[1:]) < 8 else "hard") for p in picked]
     assert (diffs.count("easy"), diffs.count("medium"), diffs.count("hard")) == (1, 3, 2)
     assert len(select(tmp_path, 99)) == 12
+
+
+def test_agent_that_never_reached_the_model_is_infra_not_fail():
+    from agentrt.bench.report import classify
+    base = {"verifier_result": {"rewards": {"reward": 0.0}}}
+    assert classify(base) == ("fail", 0.0)
+    errored = {**base, "agent_result": {"metadata": {"status": "error"}}}
+    assert classify(errored) == ("infra", 0.0)
+    passed = {"verifier_result": {"rewards": {"reward": 1.0}}, "agent_result": {"metadata": {"status": "error"}}}
+    assert classify(passed) == ("ok", 1.0)

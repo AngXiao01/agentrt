@@ -56,6 +56,9 @@ def classify(r: dict) -> tuple[str, float]:
         return "infra", 0.0
     if not rewards:
         return "infra", 0.0
+    meta = ((r.get("agent_result") or {}).get("metadata")) or {}
+    if meta.get("status") == "error" and reward < 1.0:   # 重试用尽仍连不上模型：Harbor 不报异常，但这不是 agent 做错了
+        return "infra", 0.0
     return ("ok" if reward >= 1.0 else "fail"), reward
 
 
@@ -66,7 +69,8 @@ def summarize(trials: list[dict]) -> dict:
         meta = ((r.get("agent_result") or {}).get("metadata")) or {}
         arms[arm_of(r)].append({"task": r["task_name"], "start": r.get("started_at") or "", "outcome": outcome,
                                 "reward": reward, "res": r.get("agent_result") or {}, "status": meta.get("status"),
-                                "exc": (r.get("exception_info") or {}).get("exception_type")})
+                                "exc": (r.get("exception_info") or {}).get("exception_type")
+                                       or ("ModelUnreachable" if outcome == "infra" and meta.get("status") == "error" else None)})
     # oracle 判不了满分的任务：这台机器上的判分不可信，所有配置都剔掉
     broken: set[str] = set()
     for name, rs in arms.items():
