@@ -168,6 +168,8 @@ def test_runs_pages(server):
     assert kinds == ["start", "llm", "dropped", "llm", "assistant", "tool", "result", "harness", "end"]
     assert t["timeline"][0]["budget"] == 600 and t["timeline"][3]["think"] is False
     assert len(t["timeline"][6]["content"]) < 5000 and t["verifier"] == "1 passed"
+    dropped = t["timeline"][2]
+    assert dropped["reasoning"] == "想了很久" and dropped["reasoning_chars"] == 4
 
 
 def test_runs_pages_stay_inside_runs_dir(server):

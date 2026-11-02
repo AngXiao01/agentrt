@@ -235,7 +235,7 @@ function Trace(box, opts) {
   const tools = {};
   const node = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; box.appendChild(d); return d; };
   const t = e => opts.times === false ? "" : `<span class="t">${sec(e.at)}</span>`;
-  const think = r => r ? `<details class="think"${$("o-think").checked || opts.openThink ? " open" : ""}><summary>思考 · ${k(r.length)} 字符</summary><pre>${esc(r)}</pre></details>` : "";
+  const think = (r, n) => r ? `<details class="think"${$("o-think").checked || opts.openThink ? " open" : ""}><summary>思考 · ${k(n ?? r.length)} 字符${n > r.length ? "（这里只显示开头）" : ""}</summary><pre>${esc(r)}</pre></details>` : "";
   return {
     add(e) {
       switch (e.kind) {
@@ -244,7 +244,7 @@ function Trace(box, opts) {
         case "user": return node("user", esc(e.text));
         case "assistant": {
           if (!e.content.trim() && !e.reasoning) return;
-          return node(e.content.trim() ? "ans" : "ev", (e.content.trim() ? md(e.content.trim()) : `${t(e)}<span class="badge">（只有思考）</span>`) + think(e.reasoning)); }
+          return node(e.content.trim() ? "ans" : "ev", (e.content.trim() ? md(e.content.trim()) : `${t(e)}<span class="badge">（只有思考）</span>`) + think(e.reasoning, e.reasoning_chars)); }
         case "llm": return node("ev llm", `${t(e)}#${e.serial} 模型 ${sec(e.seconds)} · 输入 ${k(e.prompt)}（缓存 ${pct(e.cached, e.prompt)}）· 输出 ${k(e.completion)}${e.reasoning ? `（思考 ${k(e.reasoning)}）` : ""}
           ${e.finish === "length" ? `<span class="tag red">截断</span>` : ""}${e.think === false ? `<span class="tag">关思考</span>` : ""}${e.prefix_break != null ? `<span class="tag">缓存断点 ${e.prefix_break}</span>` : ""}`);
         case "tool": return tools[e.id] = node("ev", `${t(e)}<b>${esc(e.name)}</b> <span class="st badge dots">执行中</span><pre>${esc(argsText(e.args))}</pre><div class="res"></div>`);
@@ -254,7 +254,7 @@ function Trace(box, opts) {
           if (st) { st.className = "st " + (e.denied || e.error ? "bad" : "good"); st.textContent = (e.denied ? "已拒绝" : e.error ? "出错" : "✓") + " " + sec(e.seconds); }
           el.querySelector(".res").innerHTML = `<details><summary>${esc(e.content.split("\n").slice(0, 2).join(" ").slice(0, 140) || "（空）")}</summary><pre>${esc(e.content)}</pre></details>`;
           return el; }
-        case "dropped": return node("ev warn", `${t(e)}<b>只思考没动作、被截断，已丢弃</b>（接着关掉思考重试）${think(e.reasoning)}`);
+        case "dropped": return node("ev warn", `${t(e)}<b>只思考没动作、被截断，已丢弃</b>（接着关掉思考重试）${think(e.reasoning, e.reasoning_chars)}`);
         case "harness": return node("ev warn", `${t(e)}<b>harness 提醒</b> ${esc(e.text)}`);
         case "note": return node("ev warn", `${t(e)}${esc(e.text)}`);
         case "end": { const s = e.stats || {};

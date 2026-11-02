@@ -103,8 +103,9 @@ def timeline_item(e: dict, t0: float) -> Optional[dict]:
     if t == "message":
         m = e.get("message") or {}
         if m.get("role") == "assistant":
+            r = m.get("reasoning") or m.get("reasoning_content") or ""
             return {"kind": "assistant", "at": at, "content": _clip(m.get("content") or ""),
-                    "reasoning": _clip(m.get("reasoning") or m.get("reasoning_content") or "")}
+                    "reasoning": _clip(r), "reasoning_chars": len(r)}   # 页面只拿前 CLIP 字符，长度报原文的
         if m.get("role") == "user" and m.get("kind") == "harness":
             return {"kind": "harness", "at": at, "text": _clip(m.get("content") or "")}
         return None
@@ -120,7 +121,8 @@ def timeline_item(e: dict, t0: float) -> Optional[dict]:
         return {"kind": "result", "at": at, "id": e.get("call_id"), "content": _clip(e.get("content") or ""),
                 "error": bool(e.get("is_error")), "denied": e.get("behavior") == "deny", "seconds": e.get("seconds")}
     if t == "dropped_reply":
-        return {"kind": "dropped", "at": at, "reasoning": _clip(e.get("reasoning") or "")}
+        r = e.get("reasoning") or ""
+        return {"kind": "dropped", "at": at, "reasoning": _clip(r), "reasoning_chars": len(r)}
     if t == "compact":
         return {"kind": "note", "at": at,
                 "text": f"上下文压缩：{e.get('before_tokens')} → {e.get('after_tokens')} tokens（{e.get('reason')}）"}
