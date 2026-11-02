@@ -1,18 +1,16 @@
-"""权限判定链，对照 Claude Code 源码（src/utils/permissions/permissions.ts 的 hasPermissionsToUseToolInner、
-src/services/tools/toolHooks.ts 的 resolveHookPermissionDecision）：
+"""权限判定链：
 
-  0. deny 规则先查（源码里它在 hook 之后，这里提前，被禁止的调用不会弹确认）
-  0. PreToolUse hooks   hook 说 deny 直接拒绝；hook 说 ask 强制弹确认（任何模式下都弹，对应 forceDecision）；
+  0. deny 规则先查（被禁止的调用不会弹确认）
+  0. PreToolUse hooks   hook 说 deny 直接拒绝；hook 说 ask 强制弹确认（任何模式下都弹）；
                         hook 说 allow 只是省掉确认，deny / ask 规则照样生效
-  1. deny 规则          命中即拒绝                                     （1a）
-  2. ask 规则           命中即要求确认                                 （1b / 1f）
-  3. 工具自检           路径越界、缺参数等硬约束，bypass 也绕不过      （1c / 1d / 1g：safetyCheck 免疫 bypass）
-  4. bypass 模式        全放行                                         （2a）
-  5. allow 规则         用户显式放行                                   （2b）
-  6. 其余按模式         plan 只读 / default 写操作确认 / auto 只有高风险确认 （3：passthrough → ask）
+  1. deny 规则          命中即拒绝
+  2. ask 规则           命中即要求确认
+  3. 工具自检           路径越界、缺参数等硬约束，bypass 也绕不过
+  4. bypass 模式        全放行
+  5. allow 规则         用户显式放行
+  6. 其余按模式         plan 只读 / default 写操作确认 / auto 只有高风险确认
 
 规则写法同 Claude Code：`bash(git status*)`、`write_file(*.md)`、`read_file`（整个工具）。
-和源码的差异：plan / auto 在源码里是工具自己的 checkPermissions 处理的（acceptEdits 等），这里集中在第 6 步。
 工具在 system prompt 里始终完整出现，不因模式增删（保持前缀稳定，利于 KV cache），不可用的调用在这里被拦下。
 """
 from __future__ import annotations
@@ -62,7 +60,7 @@ def sandboxed(tool: Tool, ctx: ToolContext) -> bool:
 
 
 def disposable(tool: Tool, ctx: ToolContext) -> bool:
-    """在一次性容器里执行：爆炸半径就是容器本身（Claude Code 文档：跳过权限只建议在容器里做）。"""
+    """在一次性容器里执行：爆炸半径就是容器本身（跳过权限只该在这种环境里做）。"""
     return sandboxed(tool, ctx) and bool(getattr(ctx.sandbox, "disposable", False))
 
 
@@ -141,14 +139,14 @@ class PermissionEngine:
         self.deny = deny or []
         self.ask = ask or []
         self.hooks = hooks if hooks is not None else [secret_hook, dangerous_command_hook, workspace_hook]
-        # 对应 Claude Code 的 sandbox.autoAllowBashIfSandboxed（默认开）：在内核隔离的 sandbox 里跑的 bash 免确认；
+        # 默认开：在内核隔离的 sandbox 里跑的 bash 免确认；
         # 一次性容器里所有 sandbox 工具都免确认。deny / ask 规则、hook 的 deny / ask 照样生效。
         self.sandbox_auto_allow = sandbox_auto_allow
         for r in self.allow + self.deny + self.ask:
             _parse_rule(r)  # 启动时就校验规则格式
 
     def decide(self, tool: Tool, args: dict, ctx: ToolContext) -> Decision:
-        rule = _match(self.deny, tool, args)   # 比源码更严：deny 规则先于 hook 的 ask，被禁止的调用不会弹确认
+        rule = _match(self.deny, tool, args)   # deny 规则先于 hook 的 ask，被禁止的调用不会弹确认
         if rule:
             return Decision("deny", f"命中 deny 规则 {rule}", "deny_rule")
         hook_allow = None

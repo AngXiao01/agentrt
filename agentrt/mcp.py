@@ -1,12 +1,11 @@
 """MCP 客户端（stdio）：把已有的 MCP server 的工具接成 agentrt 的工具。只依赖标准库。
 
-对照 Claude Code 源码 src/services/mcp/ 与 src/tools/MCPTool/：
 - 配置格式沿用 `{"mcpServers": {名字: {"command", "args", "env"}}}`（~/.claude.json、.mcp.json 都是这个格式）。
-- 工具名 `mcp__<server>__<tool>`（源码同样的命名），避免和内置工具重名。
+- 工具名 `mcp__<server>__<tool>`（和 Claude Code 等客户端的惯例一致），避免和内置工具重名。
 - 只读（可并行、无需确认）要两个条件：工具声明了 `annotations.readOnlyHint`，**并且**配置里把这个 server 标成
   `"trusted": true`（agentrt 自己的字段）。MCP 规范说注解只是提示，除非 server 可信，不能当真——不然任何 server
   把删除工具标成只读，就能免确认执行。其余一律走正常权限流程（默认要确认）。
-- 没有实现：HTTP / SSE 传输、OAuth、resources / prompts、list_changed 通知、工具延迟加载（源码的 ToolSearch）。
+- 没有实现：HTTP / SSE 传输、OAuth、resources / prompts、list_changed 通知、工具延迟加载。
 传输：换行分隔的 JSON-RPC 2.0（官方 Python SDK 的 stdio 传输就是这样）。server 的 env 只传给该子进程，
 不进日志、不进 prompt；子进程只额外拿到 PATH / HOME / LANG。
 """

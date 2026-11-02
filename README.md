@@ -1,8 +1,41 @@
 # agentrt
 
+**English summary** — a small, complete agent harness in pure Python (stdlib only, 3.9+, ~3.5k lines of core) for any OpenAI-compatible endpoint (vLLM, DeepSeek, OpenRouter, …). The rest of this README is in Chinese.
+
+- **Agent loop**: compaction check → model call → parse tool calls → permission check → execute → feed results back. Read-only calls run in parallel; text or native function-calling protocol; reasoning replay for thinking models.
+- **Sessions**: append-only JSONL event log. A crashed session resumes from the log: read-only calls are re-run, side-effecting ones are reported to the model as "outcome unknown" instead of being repeated.
+- **Permissions**: deny / ask / allow rules, hooks, modes (plan / default / auto / bypass), human approval.
+- **Context**: oversized tool results go to disk; old results are cleared before the model is asked to summarize; reactive compaction on context-length errors.
+- **Sandboxes**: local, macOS sandbox-exec, Linux bwrap, Docker, or an existing container. Plus MCP (stdio) and read-only subagents.
+- **Web console** (`python3 -m agentrt web`): chat with the agent and watch every model call (tokens, cache hits, thinking), tool call, truncation and retry live; replay past sessions; browse benchmark runs trial by trial.
+- **Benchmarks**: runs Terminal-Bench 2.0 as a Harbor external agent. Reports separate infra failures, drop tasks the oracle can't pass, and give Wilson intervals and McNemar tests.
+
+Terminal-Bench 2.0, stratified 10-task subset, 1 attempt per task (a small sample: the 95% interval for 8/10 is 0.49–0.94):
+
+| Model (OpenRouter) | Passed | Cost |
+|---|---|---|
+| qwen/qwen3.7-flash | 2/10 | $2.25 |
+| deepseek/deepseek-v4.1-flash | 8/10 | $0.45 |
+
+The one DeepSeek timeout (regex-chess) passed on a rerun after raising `max_tokens` from 16k to 64k. What mattered most:
+
+- **Pin one fast provider.** The same model ran at ~326 tok/s on the fastest provider and ~53 on the slowest, and pinning keeps the prefix cache warm (87% hits).
+- **Give thinking models room.** DeepSeek V4.1 Flash ignores reasoning budgets, so a low `max_tokens` cuts it off mid-thought. If a reply is cut off with no action, drop it and retry once with thinking off.
+- **Fewer turns save more than cheaper tokens.** Long sessions resend the whole context every turn.
+
+```bash
+python3 -m agentrt run "add the numbers in n.txt and write the sum to sum.txt" --workspace /tmp/demo --mode auto
+python3 -m agentrt web
+python3 -m pytest -q        # no model needed
+```
+
+MIT licensed.
+
+---
+
 一个最小但完整的 agent 运行时，只依赖 Python 标准库（3.9+），模型走 OpenAI 兼容接口（vLLM、DeepSeek、OpenRouter 等）。
 
-- **主循环、权限链、上下文压缩、JSONL 会话**：对照 Claude Code v2.1.88 源码实现，逐项对照见“与 Claude Code 源码的对应”。
+- **主循环、权限链、上下文压缩、JSONL 会话**：实现了哪些、没做哪些见“功能一览”。
 - **会话 / harness / sandbox 三分**：参照 Claude Managed Agents，并对照了 DeepSeek Harness（`deepseek-ai/deepseek-harness`）的 session 与 sandbox 设计。
 - **上下文策略**：参照 Manus 的 context engineering 六条原则。
 - **跑分**：可以作为 Harbor 外部 agent 跑 Terminal-Bench 2.0；自带 8 个本地评测任务，报告带区间估计和配对检验。
@@ -88,7 +121,7 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
 | `container:<id>` | 接到已有容器，不管理其生命周期 | full | 是 | 调试 |
 | Harbor | Terminal-Bench 的任务容器（`HarborSandbox`） | full | 是 | 跑分 |
 
-权限随隔离强度变化，对应 Claude Code 的 `sandbox.autoAllowBashIfSandboxed`：
+权限随隔离强度变化：
 
 - 内核隔离的 sandbox 里，`workspace_hook` 这类路径正则不再参与（只会误报），bash 免确认。
 - 一次性容器里所有 sandbox 工具都免确认，`rm -rf` 也放行，爆炸半径就是容器本身。
@@ -97,10 +130,10 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
 
 ### 编码工具集
 
-`coding_tools.py`，对照 Claude Code 的 Bash / Read / Write / Edit / Glob / Grep / TodoWrite，在任何 sandbox 后端上都能用：
+`coding_tools.py`，一组职责单一的工具（bash / read_file / write_file / edit_file / glob / grep / todo_write），在任何 sandbox 后端上都能用：
 
 - 改文件前必须先读，且读完之后文件没被别的途径改过；记录的是内容哈希而不是 mtime，因为容器里的时钟不可信。
-- bash 在多次调用之间保持工作目录，不保持环境变量（与源码一致）。
+- bash 在多次调用之间保持工作目录，不保持环境变量。
 - 超长输出落在 sandbox 的 scratch 目录，不进任务目录：SWE-bench 取 `git diff`、Terminal-Bench 的测试都会看工作目录。
 - 英文 system prompt，写明无人值守、按环境最终状态判分。
 
@@ -112,16 +145,16 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
   - `all`：全部回传。
   - 取舍：`turn` 在新一轮用户消息到来时会丢掉上一轮的 reasoning，前缀被改写一次；`all` 不改写前缀，但上下文更长。
 - **用量归一**：缓存命中同时认 `prompt_tokens_details.cached_tokens`（OpenAI / vLLM，后者要开 `--enable-prompt-tokens-details`）和 `prompt_cache_hit_tokens`（DeepSeek）。reasoning tokens、压缩时摘要调用的 tokens、按给定价格算的成本都计入 `RunResult` 和 trace。
-- **token 计数**：不引入 tokenizer。和 Claude Code 的 `tokenCountWithEstimation` 一样，以服务端上一次报告的用量为锚点，只对锚点之后新增的消息粗估；压缩改写了历史就作废锚点。
+- **token 计数**：不引入 tokenizer。以服务端上一次报告的用量为锚点，只对锚点之后新增的消息粗估；压缩改写了历史就作废锚点。
 
 ## 上下文管理
 
-| 机制 | 做法 | 对应源码 |
-|---|---|---|
-| 工具结果落盘 | 超长结果全文存盘，上下文只留头尾和路径，模型需要时分页读 | `toolResultStorage.ts` |
-| microcompact | 较早的可再生工具结果换成占位符，保留最近 5 条，不调模型，先于摘要尝试 | `microCompact.ts` |
-| autocompact | 估算超过“预算 − 缓冲”时用模型摘要早期历史；缓冲 13,000 tokens，预算小时取预算的 25% | `autoCompact.ts` |
-| reactive compact | 服务端报上下文超长后，更激进地压一次再重试 | `reactiveCompact.ts` |
+| 机制 | 做法 |
+|---|---|
+| 工具结果落盘 | 超长结果全文存盘，上下文只留头尾和路径，模型需要时分页读 |
+| microcompact | 较早的可再生工具结果换成占位符，保留最近 5 条，不调模型，先于摘要尝试 |
+| autocompact | 估算超过“预算 − 缓冲”时用模型摘要早期历史；缓冲 13,000 tokens，预算小时取预算的 25% |
+| reactive compact | 服务端报上下文超长后，更激进地压一次再重试 |
 
 Manus 六条原则的落点：
 
@@ -152,7 +185,7 @@ Manus 六条原则的落点：
 | 工具异常 / 超时 | 异常回填；超时终止整个进程组 |
 | 死循环 | 相同调用提示 + `max_turns` 上限 |
 
-和源码的区别：Claude Code 的 `filterUnresolvedToolUses` 直接丢弃没有结果的调用，再追加 “Continue from where you left off.”。这里保留调用并区分只读和有副作用，避免 trash 这类操作被模型悄悄重做。
+恢复时不丢弃没有结果的调用：只读的重跑，有副作用的如实告诉模型“结果未知、先检查”，避免 trash 这类操作被悄悄重做。
 
 ## 安全
 
@@ -195,6 +228,15 @@ N=89 C=4 scripts/run_tb2.sh deepseek/deepseek-chat     # 全量
 python3 -m agentrt.bench.preflight --model deepseek/deepseek-chat
 python3 -m agentrt.bench.report runs/tb2-*/jobs
 ```
+
+实测（2026-11，OpenRouter，TB2 分层抽 10 题、每题 1 次，样本小，8/10 的 95% 区间是 0.49–0.94）：
+
+| 模型 | 通过 | 花费 | 配置 |
+|---|---|---|---|
+| qwen/qwen3.7-flash | 2/10 | $2.25 | `scripts/tb2-qwen3.7-flash.env` |
+| deepseek/deepseek-v4.1-flash | 8/10 | $0.45 | `scripts/tb2-deepseek-v4.1-flash.env` |
+
+DeepSeek 唯一超时的 regex-chess，把 `max_tokens` 从 16k 提到 64k 后重跑通过。几条经验：钉住一个快的服务商（同一模型最快约 326 tok/s、最慢约 53，钉住后缓存命中 87%）；思考模型的输出上限要给够；省钱主要靠少走轮数，不是单价。
 
 汇总口径：
 
@@ -241,27 +283,23 @@ python3 -m evals.run_evals --resume evals_out/<时间>                      # �
 
 结果写到 `evals_out/<时间>/`：`trials.jsonl`、`report.md`，以及每次试验的事件日志。
 
-## 与 Claude Code 源码的对应
+## 功能一览
 
-对照 Claude Code v2.1.88 源码（`src/` 下的路径）。“对应”表示读过源码、行为一致；“不同”写明差异；“没有”就是没实现。
-
-| 模块 | 本实现 | 源码 | 结论 |
-|---|---|---|---|
-| 主循环 | `Agent._loop`：压缩 → 调模型 → 解析 → 权限 → 执行 → 回填 | `query.ts` | 对应；没有流式输出 |
-| 中断 | `Agent.cancel()`：下一个检查点停下，未执行的调用补“已中断”结果 | `abortController`、`yieldMissingToolResultBlocks` | 对应；进行中的 HTTP 请求不能立刻掐断 |
-| 权限判定 | `permissions.py` | `permissions.ts` + `toolHooks.ts` | 对应；deny 规则提到 hook 之前（更严）；plan / auto 集中处理 |
-| 并行 | 连续的只读调用并行（最多 10 个） | `partitionToolCalls`、`MAX_TOOL_USE_CONCURRENCY` | 对应；没有边流式边执行 |
-| 工具结果落盘 | 超长全文存盘，上下文留头尾 + 路径 | `toolResultStorage.ts` | 对应；阈值更小（上下文预算小） |
-| microcompact / autocompact / reactive | 见“上下文管理” | `services/compact/` | 对应；microcompact 按用量触发，源码按时间 |
-| snip / context collapse | — | `snipCompact.ts`、`contextCollapse/` | 没有 |
-| 会话日志与恢复 | JSONL + `resume` | `sessionStorage.ts`、`conversationRecovery.ts` | 对应；恢复语义不同，见“故障语义” |
-| 任务清单 | `todo_write` | `TodoWriteTool` | 对应 |
-| 子 agent | `delegate`：独立上下文、只读白名单、只回摘要 | `AgentTool` | 对应；只有同步只读版 |
-| MCP | stdio 客户端，`mcp__<server>__<tool>` | `services/mcp/` | 对应；没有 HTTP/SSE、OAuth、resources、ToolSearch |
-| token 计数 | usage 锚点 + 粗估 | `tokenCountWithEstimation` | 对应 |
-| bash 沙箱 | macOS sandbox-exec；Linux bwrap；Docker | `sandbox-runtime`、`autoAllowBashIfSandboxed` | 对应；没有网络代理和 allowlist |
-| 改前必读 | 未读 / 读后被改的文件拒绝写入（内容哈希） | FileEditTool / FileWriteTool：readFileState + mtime | 对应 |
-| skills / 流式 | — | `SkillTool`、流式 | 没有 |
+| 模块 | 实现 | 限制 |
+|---|---|---|
+| 主循环 | `Agent._loop`：压缩 → 调模型 → 解析 → 权限 → 执行 → 回填 | 没有流式输出 |
+| 中断 | `Agent.cancel()`：下一个检查点停下，未执行的调用补“已中断”结果 | 进行中的 HTTP 请求不能立刻掐断 |
+| 权限判定 | `permissions.py`：deny → hooks → 工具自检 → allow → 模式 | — |
+| 并行 | 连续的只读调用并行（最多 10 个） | 不边流式边执行 |
+| 上下文 | 工具结果落盘、microcompact / autocompact / reactive，见“上下文管理” | 没有 snip / context collapse |
+| 会话日志与恢复 | JSONL + `resume`，见“故障语义” | — |
+| 任务清单 | `todo_write` | — |
+| 子 agent | `delegate`：独立上下文、只读白名单、只回摘要 | 只有同步只读版 |
+| MCP | stdio 客户端，`mcp__<server>__<tool>` | 没有 HTTP/SSE、OAuth、resources、工具延迟加载 |
+| token 计数 | usage 锚点 + 粗估 | — |
+| bash 沙箱 | macOS sandbox-exec；Linux bwrap；Docker | 没有网络代理和 allowlist |
+| 改前必读 | 未读 / 读后被改的文件拒绝写入（内容哈希） | — |
+| skills | — | 没有 |
 
 ## 网页控制台
 
@@ -336,8 +374,12 @@ python3 -m pytest -q   # 不需要模型；macOS 沙箱测试只在 macOS 上跑
 
 ## 未做
 
-- 真实模型在 Terminal-Bench 2.0 上的成绩。
+- Terminal-Bench 2.0 全量、多次重复的成绩（目前只有 10 题 × 1 次）。
 - Anthropic Messages 后端（thinking block 签名回放、显式 `cache_control`）；目前只有 OpenAI 兼容接口。
 - 不改写日志的压缩：现在压缩写一条带完整新消息列表的 `compact` 事件。DeepSeek Harness 的做法是 `compaction/start → summary → end` 加锁事务 + `surfaceOp: replace`，原事件不动，模型视图是投影。
 - resume 后重建 read-before-write 账本（目前要求模型重读）。
 - 流式输出；snip / context collapse；MCP 的 HTTP 传输；持久 shell（环境变量跨调用保持）。
+
+## 许可证
+
+MIT，见 `LICENSE`。

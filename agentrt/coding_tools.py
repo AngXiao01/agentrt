@@ -1,11 +1,10 @@
 """编码工具集：全部走 Sandbox 的三个动词（exec / read_bytes / write_bytes），本机、bwrap、Docker、Harbor 通用。
 
-对照 Claude Code 的核心工具（Bash / Read / Write / Edit / Glob / Grep / TodoWrite）：
-- read_file 输出 `行号<TAB>内容`，单行超长截断，默认一次 400 行（上下文预算小，比源码的 2000 行保守）。
-- 改文件前必须先读，而且读完之后文件没被别的途径改过（源码 FileEditTool / FileWriteTool 的
-  “File has not been read yet” / “File has been modified since read”）。这里记内容哈希而不是 mtime：
+一组职责单一的工具（bash / read_file / write_file / edit_file / glob / grep / todo_write）：
+- read_file 输出 `行号<TAB>内容`，单行超长截断，默认一次 400 行（上下文预算小，保守一些）。
+- 改文件前必须先读，而且读完之后文件没被别的途径改过。这里记内容哈希而不是 mtime：
   容器里的 mtime 精度和时钟都不可信。
-- bash：工作目录在多次调用之间保持（源码同样只保持 cwd，不保持环境变量和 shell 状态）。
+- bash：工作目录在多次调用之间保持，不保持环境变量和 shell 状态。
 - 工具不碰宿主机文件系统；harness 自己的东西（超长输出落盘）写在 sandbox 的 /tmp 下，不污染任务目录
   （SWE-bench 取 git diff、Terminal-Bench 的测试都会看工作目录）。
 """

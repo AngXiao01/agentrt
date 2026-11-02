@@ -1,8 +1,8 @@
 """子 agent：独立上下文 + 只读工具白名单，只把摘要带回主循环。
 
-对照 Claude Code 的 AgentTool（src/tools/AgentTool/）：子 agent 有自己的消息历史，主上下文里只多一条 tool_result。
+子 agent 有自己的消息历史，主上下文里只多一条 tool_result。
 好处是“把整个目录摸一遍”这类要读很多东西的活不会撑大主上下文；多个 delegate 是只读调用，会被并行执行。
-和源码的差异：只做同步的只读子 agent，不能递归派生、不能后台运行、没有自定义 agent 类型。
+限制：只做同步的只读子 agent，不能递归派生、不能后台运行、没有自定义 agent 类型。
 """
 from __future__ import annotations
 

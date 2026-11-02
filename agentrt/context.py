@@ -1,12 +1,11 @@
-"""上下文管理，对照 Claude Code 源码 src/services/compact/ 和 src/utils/toolResultStorage.ts：
+"""上下文管理，从便宜到贵四层：
 
-- 工具结果落盘（loop._shrink ↔ toolResultStorage.persistToolResult）：单条结果超长时全文存盘，上下文里只留预览和路径。
-- microcompact（↔ microCompact.ts）：把较早的、可再生的工具结果（搜索 / 读取类）清成固定占位符，只保留最近 N 条；
+- 工具结果落盘（loop._shrink）：单条结果超长时全文存盘，上下文里只留预览和路径。
+- microcompact：把较早的、可再生的工具结果（搜索 / 读取类）清成固定占位符，只保留最近 N 条；
   不调用模型，最便宜，所以在 autocompact 之前先试。
-- autocompact（↔ autoCompact.ts）：估算 token 超过 阈值 = 预算 − 缓冲 时，用模型把较早的历史总结成一条摘要。
-  源码的缓冲是 13,000 tokens（AUTOCOMPACT_BUFFER_TOKENS）；预算较小时按预算的 25% 封顶。
-- reactive compact（↔ reactiveCompact.ts）：服务端报上下文超长时，用更激进的参数立刻压一次再重试。
-源码里还有 snip / context collapse，这里没有实现。
+- autocompact：估算 token 超过 阈值 = 预算 − 缓冲 时，用模型把较早的历史总结成一条摘要。
+  缓冲 13,000 tokens；预算较小时按预算的 25% 封顶。
+- reactive compact：服务端报上下文超长时，用更激进的参数立刻压一次再重试。
 
 system prompt 始终保持不变（不放时间戳等易变内容），压缩只替换中间的历史，
 其余时候上下文只追加不修改，尽量复用 KV cache。
@@ -38,7 +37,7 @@ AUTOCOMPACT_BUFFER_TOKENS = 13_000
 
 def clear_old_results(messages: list[dict], keep_recent: int = 5) -> tuple[list[dict], int]:
     """microcompact：除最近 keep_recent 条外，其余可压缩工具的结果换成占位符。返回 (新消息, 清除条数)。
-    至少保留 1 条（源码里 Math.max(1, keepRecent)：清光会让模型没有任何工作上下文）。"""
+    至少保留 1 条：清光会让模型没有任何工作上下文。"""
     keep_recent = max(1, keep_recent)
     ids = [m["tool_call_id"] for m in messages if m["role"] == "tool" and m.get("name") in COMPACTABLE]
     clear = set(ids[:-keep_recent]) if len(ids) > keep_recent else set()
@@ -70,14 +69,14 @@ SUMMARY_PROMPT = (
 
 
 class ContextManager:
-    # 计数方式对照源码 utils/tokens.ts 的 tokenCountWithEstimation：Claude Code 自己也不跑 tokenizer，
-    # 而是 “上一次 API 返回的 usage + 其后新增消息的粗估（字符数 / 4）”。服务端数的才是准的，也不依赖第三方库。
+    # 计数方式：不跑 tokenizer，而是 “上一次 API 返回的 usage + 其后新增消息的粗估（字符数 / 4）”。
+    # 服务端数的才是准的，也不依赖第三方库。
     def __init__(self, llm, max_context_tokens: int = 24000, compact_ratio: Optional[float] = None,
                  keep_recent: int = 6, tool_result_max_chars: int = 6000, enabled: bool = True,
                  mc_keep_recent: int = 5):
         self.llm = llm
         self.max_context_tokens = max_context_tokens
-        # 阈值 = 预算 − 缓冲（源码：有效窗口 − 13,000）；预算小时缓冲按 25% 封顶。compact_ratio 仅用于测试 / 对照实验覆盖
+        # 阈值 = 预算 − 缓冲（13,000）；预算小时缓冲按 25% 封顶。compact_ratio 仅用于测试 / 对照实验覆盖
         self.compact_ratio = compact_ratio
         self.mc_keep_recent = mc_keep_recent
         self.keep_recent = keep_recent

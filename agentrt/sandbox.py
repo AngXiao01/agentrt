@@ -56,7 +56,7 @@ def argv(command: str, workspace: Path, read_only: bool = False, tmp: Path | Non
 
 
 # ---------------------------------------------------------------- 只读命令判定
-# 对应源码 BashTool 的 isReadOnly：每一段管道的命令都在白名单里、没有重定向 / 命令替换 / 多命令，才算只读。
+# 每一段管道的命令都在白名单里、没有重定向 / 命令替换 / 多命令，才算只读。
 READ_ONLY_CMDS = {"ls", "cat", "head", "tail", "wc", "du", "df", "file", "stat", "find", "sort", "uniq", "grep",
                   "egrep", "fgrep", "mdls", "shasum", "md5", "pwd", "date", "echo", "basename", "dirname",
                   "realpath", "tr", "cut", "nl", "uname", "which", "diff", "unzip", "tar", "zipinfo"}

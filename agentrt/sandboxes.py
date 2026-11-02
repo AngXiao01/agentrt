@@ -7,8 +7,8 @@
 - DeepSeek Harness（dsh-sandbox / ctx.fs / ctx.subprocess）：文件系统和进程提供方共享同一个“执行世界”，
   所以把它指向远程 sandbox，bash 和读写文件一起搬过去；文件效果策略按调用携带
   （read-only / workspace-write / danger-full-access）；后端如实报告 enforcement（full / partial）。
-- Claude Code：bash 在 sandbox 里执行时可以免确认（autoAllowBashIfSandboxed）。这里用 `disposable` +
-  `enforcement` 两个事实让权限层做同样的判断（见 permissions.py）。
+- bash 在内核隔离的 sandbox 里执行时可以免确认：用 `disposable` + `enforcement` 两个事实让权限层判断
+  （见 permissions.py）。
 
 后端：
   LocalSandbox   直接在宿主机执行，不隔离（enforcement = none）。文件工具仍做工作目录越界检查。

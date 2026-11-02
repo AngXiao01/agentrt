@@ -1,4 +1,4 @@
-"""Agent 主循环。结构参考 Claude Code 的 query.ts：一个 while 循环，每轮
+"""Agent 主循环：一个 while 循环，每轮
 
     上下文检查 / 压缩 → 调模型 → 解析工具调用 → 权限判定 → 执行 → 结果回填
 
@@ -89,7 +89,7 @@ class RunResult:
     error: str = ""
 
 
-MAX_PARALLEL = 10  # 源码 MAX_TOOL_USE_CONCURRENCY 默认值
+MAX_PARALLEL = 10  # 一批只读调用最多并行几个
 INTERRUPT_MSG = "[用户中断了本次请求]"
 MAX_LENGTH_NUDGES = 3   # 连续被截断且没有调用时，最多提醒几次再放弃
 LENGTH_NUDGE = ("（上一条输出触到长度上限被截断，没有给出调用或答复。少想一点，直接调用工具推进；"
@@ -156,7 +156,7 @@ class Agent:
         self._wrapup_sent = False
         self.result = RunResult(session_id=log.session_id)
         self._lock = threading.RLock()  # 只读工具并行执行时保护事件日志和计数器
-        self._cancel = threading.Event()  # 用户中断（对应 Claude Code 的 abortController）
+        self._cancel = threading.Event()  # 用户中断
         self._live: list[dict] = []  # 最近一次循环里的消息列表（压缩会换新列表，所以单独记一份）
         self._chat_started = False
         self.ctx.on_spawn = self._on_spawn
@@ -382,7 +382,7 @@ class Agent:
         return bool(t and isinstance(call.arguments, dict) and t.is_read_only(call.arguments))
 
     def _batches(self, calls: list[ToolCall]) -> list[list[ToolCall]]:
-        """对应源码 toolOrchestration.partitionToolCalls：连续的并发安全（只读）调用合成一批并行，其余各自串行。"""
+        """连续的并发安全（只读）调用合成一批并行，其余各自串行。"""
         out: list[list[ToolCall]] = []
         for c in calls:
             if out and self._is_parallel_safe(c) and self._is_parallel_safe(out[-1][0]):

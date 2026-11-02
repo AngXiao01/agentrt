@@ -57,7 +57,7 @@ class Tool:
     risk = "low"  # low / medium / high
 
     def is_read_only(self, args: dict) -> bool:
-        """按本次调用的参数判断是否只读（对应源码 isReadOnly(input)）；默认取类属性。bash 靠它区分 ls 和 mv。"""
+        """按本次调用的参数判断是否只读；默认取类属性。bash 靠它区分 ls 和 mv。"""
         return self.read_only
 
     def subject(self, args: dict) -> str:

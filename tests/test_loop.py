@@ -268,7 +268,7 @@ def test_volatile_prefix_changes_system(make_agent):
     assert agent.system in llm.calls[0][0]["content"]
 
 
-# ---------------------------------------------------------------- 对照 Claude Code 源码补的行为
+# ---------------------------------------------------------------- 权限规则、中断、并行等行为
 
 def test_ask_rule_beats_allow_and_bypass(make_agent):
     from agentrt.permissions import PermissionEngine
