@@ -1,4 +1,4 @@
-"""文件搜索 / 整理工具（assistant 用）。
+"""文件搜索 / 整理工具（文件助手用）。
 
 和 tools.py 里的工具一样受工作目录约束（validate 与 run 两处检查）。
 没有“永久删除”：trash 把文件放进系统废纸篓（macOS 走访达，可「放回原处」）。
@@ -16,7 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .tools import Tool, ToolContext, ToolError, _obj, resolve_in_workspace
+from agentrt.tools import Tool, ToolContext, ToolError, _obj, resolve_in_workspace
 
 SKIP_DIRS = {".git", ".agentrt", ".trash", "node_modules", "__pycache__", ".venv", "venv", ".Trash",
              "Library", ".cache", ".DS_Store"}

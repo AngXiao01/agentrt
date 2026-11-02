@@ -1,5 +1,5 @@
 """电脑文件助手：交互式 REPL，形态参照 Claude Code —— 你说需求，它自己搜索、查看、整理，
-需要改动文件时先问你。底层就是 Agent 主循环 + fs_tools。"""
+需要改动文件时先问你。底层就是 agentrt 的 Agent 主循环 + 本目录的 fs_tools，是“在 harness 上搭一个应用”的例子。"""
 from __future__ import annotations
 
 import sys
@@ -8,11 +8,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .loop import Agent
+from agentrt import sandbox
+from agentrt.loop import Agent
+from agentrt.subagent import Delegate
+from agentrt.tools import Grep, ListDir, ReadFile, SandboxedBash
+
 from .fs_tools import CopyFile, FileStats, FindDuplicates, FindFiles, MoveFile, Trash
-from . import sandbox
-from .subagent import Delegate
-from .tools import Grep, ListDir, ReadFile, SandboxedBash
 
 ASSISTANT_PROMPT = """## 你的角色：电脑文件助手
 工作目录就是用户让你管理的范围。你负责帮用户查找、了解、整理其中的文件。
@@ -102,7 +103,7 @@ def repl(agent: Agent, read: Callable[[str], str] = input, out=sys.stdout) -> No
             agent.reset()
             print("已清空对话。", file=out)
         elif line.startswith("/mode"):
-            from .permissions import MODES
+            from agentrt.permissions import MODES
             m = line.split()[1:] and line.split()[1]
             if m in MODES:
                 agent.perms.mode = m

@@ -4,15 +4,25 @@ from pathlib import Path
 
 import pytest
 
-from agentrt.assistant import build_assistant
 from agentrt.context import ContextManager, estimate_tokens
 from agentrt.llm import ScriptedLLM
+from agentrt.loop import Agent
 from agentrt.mcp import load_mcp_tools
 from agentrt.permissions import PermissionEngine, allow_all_approver
 from agentrt.session import EventLog
+from agentrt.subagent import Delegate
+from agentrt.tools import default_tools
 from conftest import call
 
 FAKE = str(Path(__file__).with_name("fake_mcp_server.py"))
+
+
+def _agent(llm, ws, log, approver, extra_tools=()):
+    """核心 Agent：本地工具 + 额外工具 + delegate 子 agent。"""
+    ag = Agent(llm, ws, log, tools=default_tools() + list(extra_tools), permissions=PermissionEngine("default"),
+               approver=approver, context=ContextManager(llm))
+    ag.add_tool(Delegate(ag))
+    return ag
 
 
 @pytest.fixture
@@ -52,9 +62,7 @@ def test_mcp_permissions_and_env_not_leaked(mcp, tmp_path):
     llm = ScriptedLLM([call("mcp__fake__echo", text="a"), call("mcp__fake__write_note", path="x"), "完成"])
     log = EventLog.new(tmp_path / "s")
     asked = []
-    ag = build_assistant(llm, tmp_path, log, permissions=PermissionEngine("default"),
-                         approver=lambda t, a, d: asked.append(t.name) or True, context=ContextManager(llm),
-                         on_event=None, extra_tools=list(tools.values()))
+    ag = _agent(llm, tmp_path, log, lambda t, a, d: asked.append(t.name) or True, list(tools.values()))
     assert ag.send("go").final == "完成"
     assert asked == ["mcp__fake__write_note"]                          # 只读的直接放行，会改动的要确认
     assert "s3cr3t-value" not in log.path.read_text()                  # server 的 env 不进日志
@@ -62,23 +70,22 @@ def test_mcp_permissions_and_env_not_leaked(mcp, tmp_path):
 
 
 def test_delegate_returns_only_summary_and_is_read_only(tmp_path):
-    (tmp_path / "a.txt").write_text("hi")
-    # 脚本顺序：主 → 子（调用 find_files）→ 子（报告）→ 主（最终答复）
-    llm = ScriptedLLM([call("delegate", task="查 txt"), '<tool_call>{"name":"find_files","arguments":{"name":"*.txt"}}</tool_call>',
+    (tmp_path / "a.txt").write_text("raw-file-content")
+    # 脚本顺序：主 → 子（调用 read_file）→ 子（报告）→ 主（最终答复）
+    llm = ScriptedLLM([call("delegate", task="查 txt"), call("read_file", path="a.txt"),
                        "结论：只有 a.txt", "子 agent 说只有 a.txt"])
     log = EventLog.new(tmp_path / "s")
-    ag = build_assistant(llm, tmp_path, log, permissions=PermissionEngine("default"), approver=allow_all_approver,
-                         context=ContextManager(llm), on_event=None)
+    ag = _agent(llm, tmp_path, log, allow_all_approver)
     res = ag.send("调查一下")
     assert res.final == "子 agent 说只有 a.txt"
     main_ctx = json.dumps(ag._live, ensure_ascii=False)
-    assert "结论：只有 a.txt" in main_ctx and "共 1 个文件" not in main_ctx    # 主上下文里只有摘要，没有子 agent 的原始工具输出
+    assert "结论：只有 a.txt" in main_ctx and "raw-file-content" not in main_ctx   # 主上下文里只有摘要，没有子 agent 的原始工具输出
     kinds = [e["type"] for e in log.events()]
     assert "subagent_start" in kinds and "subagent_end" in kinds
     sub = log.path.with_name(f"{log.path.stem}.sub1.jsonl")
-    assert sub.exists() and "find_files" in sub.read_text()
+    assert sub.exists() and "raw-file-content" in sub.read_text()
     child_tools = next(e for e in log.events() if e["type"] == "subagent_start")["tools"]
-    assert "delegate" not in child_tools and "trash" not in child_tools    # 白名单：只读，不能再派生
+    assert "delegate" not in child_tools and "write_file" not in child_tools and "bash" not in child_tools  # 白名单：只读，不能再派生
 
 
 def test_context_count_uses_server_usage_then_estimates_the_tail():
@@ -102,9 +109,7 @@ def test_read_only_hint_only_counts_for_trusted_servers(tmp_path):
         assert echo.declared_read_only and not echo.read_only          # 自称只读，但 server 没被标成可信
         llm = ScriptedLLM([call("mcp__stranger__echo", text="a"), "完成"])
         asked = []
-        ag = build_assistant(llm, tmp_path, EventLog.new(tmp_path / "s"), permissions=PermissionEngine("default"),
-                             approver=lambda t, a, d: asked.append(t.name) or True, context=ContextManager(llm),
-                             on_event=None, extra_tools=tools)
+        ag = _agent(llm, tmp_path, EventLog.new(tmp_path / "s"), lambda t, a, d: asked.append(t.name) or True, tools)
         ag.send("go")
         assert asked == ["mcp__stranger__echo"]                         # 所以要确认
     finally:

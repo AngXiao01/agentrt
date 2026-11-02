@@ -320,25 +320,16 @@ def test_autocompact_tries_microcompact_before_summarizing(make_agent):
 
 
 def test_read_only_calls_run_in_parallel_batches(tmp_path):
-    from agentrt.assistant import assistant_tools
     from agentrt.context import ContextManager
-    from agentrt.llm import ScriptedLLM
+    from agentrt.llm import ScriptedLLM, ToolCall
     from agentrt.loop import Agent
     from agentrt.session import EventLog
     llm = ScriptedLLM([""])
-    ag = Agent(llm, tmp_path, EventLog.new(tmp_path / "s"), tools=assistant_tools(), context=ContextManager(llm))
-    from agentrt.llm import ToolCall
+    ag = Agent(llm, tmp_path, EventLog.new(tmp_path / "s"), context=ContextManager(llm))
     mk = lambda n: ToolCall("i", n, {})  # noqa: E731
-    shape = [[c.name for c in b] for b in ag._batches([mk("find_files"), mk("grep"), mk("trash"), mk("list_dir"),
-                                                       mk("file_stats")])]
-    assert shape == [["find_files", "grep"], ["trash"], ["list_dir", "file_stats"]]
-
-
-def test_assistant_toolset_is_small():
-    from agentrt.assistant import assistant_tools
-    names = [t.name for t in assistant_tools()]
-    assert len(names) == 9 and "bash" not in names and "write_file" not in names
-    assert {t.name for t in assistant_tools() if not t.read_only} == {"move_file", "copy_file", "trash"}
+    shape = [[c.name for c in b] for b in ag._batches([mk("read_file"), mk("grep"), mk("write_file"), mk("list_dir"),
+                                                       mk("read_file")])]
+    assert shape == [["read_file", "grep"], ["write_file"], ["list_dir", "read_file"]]
 
 
 # ---------------------------------------------------------------- 崩溃恢复：残留的子进程

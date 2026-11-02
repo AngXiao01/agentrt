@@ -70,21 +70,6 @@ def test_sandbox_blocks_secrets_writes_outside_delete_rename_network(sbx):
                                                              f"cat {probe}"}, ctx)   # 老的“$(dirname $PWD)”绕法
 
 
-def test_assistant_gets_bash_only_with_sandbox(tmp_path, monkeypatch):
-    from agentrt.assistant import build_assistant
-    from agentrt.context import ContextManager
-    from agentrt.llm import ScriptedLLM
-    from agentrt.permissions import allow_all_approver
-    from agentrt.session import EventLog
-    llm = ScriptedLLM([])
-    mk = lambda: build_assistant(llm, tmp_path, EventLog.new(tmp_path / "s"), permissions=PermissionEngine("default"),  # noqa: E731
-                                 approver=allow_all_approver, context=ContextManager(llm), on_event=None)
-    monkeypatch.setattr(sandbox, "available", lambda: False)
-    assert "bash" not in mk().tools                                                   # 没有沙箱：失败即关闭
-    monkeypatch.setattr(sandbox, "available", lambda: True)
-    assert "bash" in mk().tools
-
-
 # ---------------------------------------------------------------- 只读：解析决定问不问，内核决定能不能写
 
 @pytest.mark.parametrize("cmd,ro", [

@@ -3,7 +3,6 @@
     python -m agentrt ping   --base-url http://127.0.0.1:8000/v1
     python -m agentrt run    "任务描述" --workspace ./ws [--mode auto] [--approve cli]
     python -m agentrt run    "任务描述" --workspace ./ws --sandbox docker:python:3.12-slim   # coding 工具集 + 容器
-    python -m agentrt assistant [--workspace ~/Downloads] [--once "请求"]
     python -m agentrt web [--workspace .] [--model ...] [--sandbox docker:python:3.12-slim] [--port 8765]
     python -m agentrt resume <session_id 或 jsonl 路径>
     python -m agentrt trace  <session_id 或 jsonl 路径> [--timeline]
@@ -149,26 +148,6 @@ def _mcp_tools(a):
     return tools
 
 
-def cmd_assistant(a) -> None:
-    from .assistant import build_assistant, repl
-    from .openrouter import OpenRouterLLM
-    llm = OpenRouterLLM(a.model, native_tools=a.native_tools, temperature=a.temperature,
-                        max_tokens=a.max_tokens, max_retries=a.retries)
-    ws = Path(a.workspace).expanduser().resolve()
-    log = EventLog.new(a.sessions_dir)
-    agent = build_assistant(llm, ws, log, permissions=PermissionEngine(a.mode, allow=a.allow, deny=a.deny, ask=a.ask),
-                            approver=APPROVERS[a.approve],
-                            context=ContextManager(llm, max_context_tokens=a.max_context, enabled=not a.no_compact),
-                            on_event=_printer(a.verbose), max_turns=a.max_turns, bash_timeout=a.bash_timeout,
-                            bash=not a.no_bash)
-    if a.once:
-        res = agent.send(a.once)
-        _report(res, log)
-    else:
-        repl(agent)
-        print(f"会话日志    {log.path}")
-
-
 def cmd_web(a) -> None:
     from .web import serve
 
@@ -194,17 +173,14 @@ def cmd_resume(a) -> None:
     start = next((e for e in log.events() if e.get("type") == "session_start"), None)
     if not start:
         sys.exit("日志里没有 session_start")
-    if start.get("backend") == "openrouter":   # 文件助手的会话：用 OpenRouter 和完整工具集恢复
-        from .assistant import build_assistant
+    if "trash" in (start.get("tools") or []):   # 例子应用的会话要用它自己的工具集恢复
+        sys.exit(f"这是文件助手的会话，用它自己的入口恢复：python3 -m examples.file_assistant --resume {a.session}")
+    if start.get("backend") == "openrouter":   # 网页控制台等走 OpenRouter 的会话
         from .openrouter import OpenRouterLLM
         llm = OpenRouterLLM(start.get("model"), temperature=a.temperature, max_tokens=a.max_tokens)
-        agent = build_assistant(llm, a.workspace or start["workspace"], log,
-                                permissions=PermissionEngine(a.mode, allow=a.allow, deny=a.deny, ask=a.ask),
-                                approver=APPROVERS[a.approve], context=ContextManager(llm, max_context_tokens=60000),
-                                on_event=_printer(a.verbose), max_turns=a.max_turns, bash_timeout=a.bash_timeout)
     else:
         llm = _llm(a)
-        agent = _agent(a, llm, log, a.workspace or start["workspace"])
+    agent = _agent(a, llm, log, a.workspace or start["workspace"])
     try:   # 无状态 harness：一切从日志重建（Managed Agents 的 wake(sessionId)）；sandbox 用 --sandbox 重新接上
         res = agent.resume()
     finally:
@@ -277,18 +253,6 @@ def main(argv=None) -> None:
     mcp_opts(sp)
     agent_opts(sp)
     sp.set_defaults(fn=cmd_run)
-
-    sp = sub.add_parser("assistant", help="电脑文件助手（OpenRouter，交互式）")
-    sp.add_argument("--workspace", default=".", help="助手能管理的目录，如 ~/Downloads")
-    sp.add_argument("--once", metavar="请求", help="只执行一条请求就退出（非交互）")
-    sp.add_argument("--model", default=None, help="默认取 AGENTRT_MODEL / OPENROUTER_MODEL")
-    sp.add_argument("--native-tools", action="store_true")
-    sp.add_argument("--temperature", type=float, default=0.2)
-    sp.add_argument("--max-tokens", type=int, default=2048)
-    sp.add_argument("--retries", type=int, default=3)
-    sp.add_argument("--no-bash", action="store_true", help="不给助手 bash（默认有沙箱时提供）")
-    agent_opts(sp)
-    sp.set_defaults(fn=cmd_assistant)
 
     sp = sub.add_parser("web", help="网页控制台：和通用 agent 对话、看实时轨迹和历史会话、浏览跑分")
     sp.add_argument("--workspace", default=".", help="初始工作目录，网页里可以改")

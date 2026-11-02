@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from agentrt.fs_tools import fs_tools
 from agentrt.permissions import PermissionEngine
 from agentrt.tools import ToolContext
+from examples.file_assistant.fs_tools import fs_tools
 
 T = {t.name: t for t in fs_tools()}
 

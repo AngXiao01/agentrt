@@ -1,9 +1,9 @@
 import json
-from agentrt.assistant import build_assistant
 from agentrt.context import ContextManager
 from agentrt.llm import ScriptedLLM
 from agentrt.permissions import PermissionEngine, allow_all_approver
 from agentrt.session import EventLog
+from examples.file_assistant.assistant import assistant_tools, build_assistant
 
 
 def test_multi_turn_keeps_context(tmp_path):
@@ -98,3 +98,31 @@ def test_repair_after_hard_interrupt(tmp_path):
     ag._chat_started = True
     ag.repair_interrupted()
     assert [m["role"] for m in ag._live[-2:]] == ["tool", "user"] and ag._live[-2]["tool_call_id"] == "x1"
+
+
+def test_assistant_toolset_is_small():
+    names = [t.name for t in assistant_tools()]
+    assert len(names) == 9 and "bash" not in names and "write_file" not in names
+    assert {t.name for t in assistant_tools() if not t.read_only} == {"move_file", "copy_file", "trash"}
+
+
+def test_read_only_calls_run_in_parallel_batches(tmp_path):
+    from agentrt.llm import ToolCall
+    from agentrt.loop import Agent
+    llm = ScriptedLLM([""])
+    ag = Agent(llm, tmp_path, EventLog.new(tmp_path / "s"), tools=assistant_tools(), context=ContextManager(llm))
+    mk = lambda n: ToolCall("i", n, {})  # noqa: E731
+    shape = [[c.name for c in b] for b in ag._batches([mk("find_files"), mk("grep"), mk("trash"), mk("list_dir"),
+                                                       mk("file_stats")])]
+    assert shape == [["find_files", "grep"], ["trash"], ["list_dir", "file_stats"]]
+
+
+def test_assistant_gets_bash_only_with_sandbox(tmp_path, monkeypatch):
+    from agentrt import sandbox
+    llm = ScriptedLLM([])
+    mk = lambda: build_assistant(llm, tmp_path, EventLog.new(tmp_path / "s"), permissions=PermissionEngine("default"),  # noqa: E731
+                                 approver=allow_all_approver, context=ContextManager(llm), on_event=None)
+    monkeypatch.setattr(sandbox, "available", lambda: False)
+    assert "bash" not in mk().tools                                                   # 没有沙箱：失败即关闭
+    monkeypatch.setattr(sandbox, "available", lambda: True)
+    assert "bash" in mk().tools

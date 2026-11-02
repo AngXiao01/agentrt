@@ -17,13 +17,14 @@ agentrt/
   sandboxes.py     执行环境：Local / Bwrap / Docker，三个动词 exec / read_bytes / write_bytes
   coding_tools.py  跑在 sandbox 上的编码工具集 + benchmark 用的 agent 组装
   tools.py         本地工具（list_dir / read_file / grep / write_file / edit_file / bash / todo_write）
-  fs_tools.py      文件助手工具（find_files / file_stats / move_file / trash …）
   sandbox.py       macOS sandbox-exec 配置 + 只读命令判定
   subagent.py      只读子 agent（delegate）
   mcp.py           MCP stdio 客户端
   bench/           harbor_agent（Harbor 外部 agent）、preflight、tb2（固定版本 + 分层子集）、report、stats、browse（网页跑分页）
   trace.py         会话摘要与时间线
-  cli.py           ping / run / resume / trace / sessions / assistant / web
+  cli.py           ping / run / resume / trace / sessions / web
+  web.py           网页控制台（会话 + 跑分）
+examples/          在 agentrt 上搭的应用：file_assistant（文件助手）
 evals/             8 个本地任务 + 多配置对照
 scripts/run_tb2.sh Terminal-Bench 2.0 一键跑分
 tests/             不需要模型：脚本化模型 + 假 OpenAI 服务；bwrap / Docker 测试在有环境时真跑
@@ -289,22 +290,6 @@ python3 -m agentrt web --runs-dir <目录>                         # “跑分�
   - 每个 trial：结果、用时 / 时限、tokens；
   - 单个 trial 的时间线：和会话页是同一套展示，再加判分输出。
 
-## 文件助手
-
-基于同一运行时的一个应用：用自然语言搜索、统计、整理本地文件，走 OpenRouter。key 读 `OPENROUTER_API_KEY` 或 `~/.openrouter_key`；模型依次取 `--model` → `AGENTRT_MODEL` → `OPENROUTER_MODEL`。
-
-```bash
-python3 -m agentrt assistant --workspace <目录>                 # 终端交互，改动前确认
-python3 -m agentrt assistant --workspace <目录> --mode plan     # 只读
-```
-
-- **工具**：只读的有 `list_dir` `find_files` `file_stats` `grep` `read_file` `find_duplicates`；会改动文件的有 `move_file` `copy_file` `trash`；另有 `delegate`（只读子 agent）和沙箱 bash。
-- **没有永久删除**：`trash` 放进系统废纸篓，`AGENTRT_TRASH_DIR` 可改为指定目录；move / copy 不覆盖已有文件。
-- **沙箱 bash**：只在专用工具做不到时用，跑在 macOS `sandbox-exec` 里。断网；只能写工作目录和临时目录；工作目录内禁止 unlink（删除只能走 `trash`）；读不到主目录里工作目录以外的内容。
-  - 只读命令（白名单、无重定向和命令替换）自动放行，并换一份禁止任何写入的更严配置执行；其余命令要确认。
-  - 没有 `sandbox-exec` 时 bash 不提供（失败即关闭）。
-  - 覆盖已有文件内容（`echo > f`、`sed -i`）不在沙箱拦截范围内，所以非只读命令必须确认。
-
 ## MCP
 
 ```bash
@@ -314,6 +299,23 @@ python3 -m agentrt run "任务" --mcp-config <含 mcpServers 的配置文件> --
 - 只有工具声明了 `readOnlyHint`，并且配置里该 server 标了 `"trusted": true`，才免确认、可并行；注解由 server 自己声明，不可信的 server 不能凭它绕过确认。
 - server 的 `env` 只传给该子进程，不进日志和 prompt。
 - 文件助手不接 MCP。
+
+## 例子：文件助手
+
+`examples/file_assistant/` 是在 agentrt 上搭的一个应用，不属于核心包：一组专用工具（`fs_tools.py`）+ 一段角色提示 + 同一个 `Agent` 主循环，用自然语言搜索、统计、整理本地文件，走 OpenRouter。在仓库根目录运行。key 读 `OPENROUTER_API_KEY` 或 `~/.openrouter_key`；模型依次取 `--model` → `AGENTRT_MODEL` → `OPENROUTER_MODEL`。
+
+```bash
+python3 -m examples.file_assistant --workspace <目录>              # 终端交互，改动前确认
+python3 -m examples.file_assistant --workspace <目录> --mode plan  # 只读
+python3 -m examples.file_assistant --resume <会话id>               # 崩溃后接着干
+```
+
+- **工具**：只读的有 `list_dir` `find_files` `file_stats` `grep` `read_file` `find_duplicates`；会改动文件的有 `move_file` `copy_file` `trash`；另有 `delegate`（只读子 agent）和沙箱 bash。
+- **没有永久删除**：`trash` 放进系统废纸篓，`AGENTRT_TRASH_DIR` 可改为指定目录；move / copy 不覆盖已有文件。
+- **沙箱 bash**：只在专用工具做不到时用，跑在 macOS `sandbox-exec` 里。断网；只能写工作目录和临时目录；工作目录内禁止 unlink（删除只能走 `trash`）；读不到主目录里工作目录以外的内容。
+  - 只读命令（白名单、无重定向和命令替换）自动放行，并换一份禁止任何写入的更严配置执行；其余命令要确认。
+  - 没有 `sandbox-exec` 时 bash 不提供（失败即关闭）。
+  - 覆盖已有文件内容（`echo > f`、`sed -i`）不在沙箱拦截范围内，所以非只读命令必须确认。
 
 ## 测试
 
