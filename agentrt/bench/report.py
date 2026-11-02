@@ -57,9 +57,17 @@ def classify(r: dict) -> tuple[str, float]:
     if not rewards:
         return "infra", 0.0
     meta = ((r.get("agent_result") or {}).get("metadata")) or {}
-    if meta.get("status") == "error" and reward < 1.0:   # 重试用尽仍连不上模型：Harbor 不报异常，但这不是 agent 做错了
+    if meta.get("status") == "error" and reward < 1.0 and model_unreachable(meta):
         return "infra", 0.0
     return ("ok" if reward >= 1.0 else "fail"), reward
+
+
+def model_unreachable(meta: dict) -> bool:
+    """status=error 的 trial 是不是“连不上模型”（Harbor 不报异常，但不是 agent 做错了）：重试用尽，或者一次模型调用
+    都没成功（比如 key 不对）。跑了几轮之后请求被拒（400 之类）是 agent 自己的失败，不能剔出分母。
+    旧的 metadata 没有 error 字段，分不出来，按连不上算（那几次跑分里都是 RetryableError）。"""
+    err = meta.get("error")
+    return err is None or err.startswith("RetryableError") or not meta.get("turns")
 
 
 def summarize(trials: list[dict]) -> dict:

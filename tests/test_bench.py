@@ -2,6 +2,7 @@
 import asyncio
 import json
 import shutil
+import subprocess
 import threading
 import types
 
@@ -56,6 +57,27 @@ def test_harbor_sandbox_roundtrip(tmp_path, harbor_loop):
         sb.read_bytes("missing.txt")
     with pytest.raises(IsADirectoryError):
         sb.read_bytes("d")
+
+
+def test_kill_running_stops_in_flight_command(tmp_path, harbor_loop):
+    """Harbor 判 agent 超时后：还在跑的命令连同子进程整组杀掉，后面的写入不会发生；跑完的命令不受影响。"""
+    import time
+    from pathlib import Path
+    sb = HarborSandbox(FakeHarborEnv(), harbor_loop, str(tmp_path))
+    assert sb.exec("exit 3", timeout=10).exit_code == 3
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=sb.exec("sleep 30 & wait; echo late > late.txt", timeout=60)))
+    t0 = time.time()
+    t.start()
+    running = Path(sb.running)
+    while not (running.is_dir() and any(running.iterdir())) and time.time() - t0 < 10:
+        time.sleep(0.05)
+    pid = next(running.iterdir()).name
+    asyncio.run_coroutine_threadsafe(sb.kill_running(), harbor_loop).result(30)
+    t.join(20)
+    assert not t.is_alive() and out["r"].exit_code != 0 and time.time() - t0 < 20
+    assert not (tmp_path / "late.txt").exists() and not any(running.iterdir())
+    assert subprocess.run(["pgrep", "-g", pid], capture_output=True).returncode != 0   # 整组都没了（含 sleep）
 
 
 def test_agent_runs_through_harbor_bridge(tmp_path, harbor_loop):
@@ -241,3 +263,10 @@ def test_agent_that_never_reached_the_model_is_infra_not_fail():
     assert classify(errored) == ("infra", 0.0)
     passed = {"verifier_result": {"rewards": {"reward": 1.0}}, "agent_result": {"metadata": {"status": "error"}}}
     assert classify(passed) == ("ok", 1.0)
+
+    def meta(**m):
+        return {**base, "agent_result": {"metadata": {"status": "error", **m}}}
+    assert classify(meta(error="RetryableError: URLError: SSL EOF", turns=3)) == ("infra", 0.0)
+    assert classify(meta(error="LLMError: HTTP 401: bad key", turns=0)) == ("infra", 0.0)
+    assert classify(meta(error="LLMError: HTTP 400: invalid request", turns=12)) == ("fail", 0.0)
+    assert classify(meta(error="ContextLengthError: too long", turns=80)) == ("fail", 0.0)

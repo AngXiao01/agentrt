@@ -34,11 +34,12 @@ import re
 import shlex
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from ..openrouter import THINK_OFF as OPENROUTER_THINK_OFF
-from ..sandboxes import _WRAP, ExecResult, SandboxError, _ExecFs
+from ..sandboxes import ExecResult, SandboxError, _ExecFs
 
 PROVIDERS = {   # -m 的前缀 → 默认端点。模型 id 取前缀之后的部分（openrouter 保留厂商前缀）
     "deepseek": "https://api.deepseek.com/v1",
@@ -59,6 +60,24 @@ def _key_from_file() -> str:
         return "EMPTY"
 
 
+# 命令包装（同 sandboxes._WRAP：有 coreutils timeout 就用它整组杀），另外把正在跑的命令记进 $3 目录：
+# timeout 自己建进程组，它的 pid 就是组号。Harbor 判 agent 超时后紧接着判分，还在跑的命令要整组杀掉（_KILL），
+# 不然会和测试同时改文件、抢 CPU（第二轮日志里超时后还有命令跑了 37 秒）。
+_TRACK = ('d=$3; mkdir -p "$d" 2>/dev/null; '
+          'if command -v bash >/dev/null 2>&1; then __sh=bash; else __sh=sh; fi; '
+          'if [ "$2" != 0 ] && command -v timeout >/dev/null 2>&1; then timeout -s KILL "$2" "$__sh" -c "$1" & '
+          'else "$__sh" -c "$1" & fi; '
+          'p=$!; echo "$p" > "$d/$p" 2>/dev/null; wait "$p"; rc=$?; rm -f "$d/$p"; exit $rc')
+# 没有 GNU timeout 时（比如 busybox）pid 不是组长：先 STOP 住它，再逐层杀子孙，最后杀它自己。
+# 顺序不能反：先杀子进程的话，父 shell 的 wait 立刻返回，会抢在被杀之前接着往下执行。
+# 不写 kill -KILL -- -pgid：dash（Debian 的 sh）不认 --
+_KILL = ('k() { for c in $(pgrep -P "$1" 2>/dev/null); do kill -STOP "$c" 2>/dev/null; k "$c"; '
+         'kill -KILL "$c" 2>/dev/null; done; }; '
+         'for f in "$1"/*; do [ -e "$f" ] || continue; p=${f##*/}; '
+         'if ! kill -KILL "-$p" 2>/dev/null; then kill -STOP "$p" 2>/dev/null; k "$p"; kill -KILL "$p" 2>/dev/null; fi; '
+         'rm -f "$f"; done')
+
+
 class HarborSandbox(_ExecFs):
     """把 Harbor 的 async environment 包成同步的 Sandbox。主循环跑在工作线程里，exec 投递回 Harbor 的事件循环。"""
     kind = "harbor"
@@ -67,6 +86,7 @@ class HarborSandbox(_ExecFs):
 
     def __init__(self, environment, loop: asyncio.AbstractEventLoop, workdir: str, user=None):
         self.env, self.loop, self.workdir, self.user = environment, loop, workdir, user
+        self.running = f"{self.scratch()}/running/{uuid.uuid4().hex[:8]}"   # 正在跑的命令的 pid 文件
 
     def _call(self, coro, timeout: float):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
@@ -80,7 +100,7 @@ class HarborSandbox(_ExecFs):
     def exec(self, command, timeout=30.0, mode="workspace-write", on_spawn=None):
         t0 = time.time()
         t = max(1, int(round(timeout)))
-        wrapped = f"sh -c {shlex.quote(_WRAP)} agentrt {shlex.quote(command)} {t}"
+        wrapped = f"sh -c {shlex.quote(_TRACK)} agentrt {shlex.quote(command)} {t} {shlex.quote(self.running)}"
         try:
             r = self._exec(wrapped, t + 15)   # 容器里 timeout -s KILL 先动手；Harbor 的超时只是兜底
         except Exception as e:  # noqa: BLE001 — Harbor 各后端超时抛的异常类型不一
@@ -90,6 +110,14 @@ class HarborSandbox(_ExecFs):
         out = (r.stdout or "") + (("\n" if r.stdout else "") + r.stderr if r.stderr else "")
         dt = time.time() - t0
         return ExecResult(r.return_code, out, r.return_code in (124, 137, -9) and dt >= t - 0.5, dt)
+
+    async def kill_running(self, timeout: int = 15) -> None:
+        """整组杀掉还在跑的命令。在 Harbor 的事件循环里、判 agent 超时之后判分之前调用。"""
+        kw: dict[str, Any] = {"timeout_sec": timeout}
+        if self.user is not None:
+            kw["user"] = self.user
+        await asyncio.wait_for(self.env.exec(f"sh -c {shlex.quote(_KILL)} agentrt {shlex.quote(self.running)}", **kw),
+                               timeout + 5)
 
     def _raw(self, argv_tail, data, timeout):
         raise NotImplementedError   # 读写各自实现：Harbor 的 exec 返回的是已经解码的文本
@@ -246,6 +274,10 @@ if BaseAgent is not None:
                 await asyncio.to_thread(agent.run, instruction)
             except asyncio.CancelledError:   # Harbor 的 agent 超时：让主循环在下一个检查点停下，别在后台继续烧 token
                 agent.cancel()
+                try:   # Harbor 等这里返回才开始判分：先把还在跑的命令杀掉
+                    await sandbox.kill_running()
+                except Exception as e:  # noqa: BLE001 — 杀不掉也要让 Harbor 继续
+                    agent._emit({"type": "kill_running_failed", "error": f"{type(e).__name__}: {e}"[:300]})
                 raise
             finally:
                 r = agent.result
@@ -258,4 +290,5 @@ if BaseAgent is not None:
                                     "compactions": r.compactions, "cache_breaks": r.cache_breaks,
                                     "reasoning_tokens": r.reasoning_tokens, "llm_seconds": round(r.llm_seconds, 1),
                                     "tool_seconds": round(r.tool_seconds, 1), "time_budget": budget,
+                                    "error": r.error[:500],
                                     "session_log": str(log.path)}
