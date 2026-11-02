@@ -117,3 +117,25 @@ def test_midread_disconnect_is_retried(fake_vllm, monkeypatch):
     llm = OpenAICompatLLM(fake_vllm.url, model="fake-gemma", sleep=slept.append, max_backoff=5.0)
     assert llm.chat([{"role": "user", "content": "hi"}]).content == "OK"
     assert len(slept) == 2 and max(slept) <= 5.0 * 1.5
+
+
+def test_think_off_only_for_that_request(fake_vllm):
+    fake_vllm.queue = [(200, completion("a")), (200, completion("b"))]
+    llm = OpenAICompatLLM(fake_vllm.url, model="fake-gemma", think_off={"reasoning": {"enabled": False}},
+                          extra_body={"reasoning": {"max_tokens": 16000}, "provider": {"order": ["wafer/us"]}})
+    msgs = [{"role": "user", "content": "hi"}]
+    llm.chat(msgs)
+    llm.chat(msgs, think=False)
+    on, off = fake_vllm.requests[-2:]
+    assert on["reasoning"] == {"max_tokens": 16000}
+    assert off["reasoning"] == {"enabled": False} and off["provider"] == {"order": ["wafer/us"]}
+
+
+def test_request_timeout_capped_by_deadline(fake_vllm):
+    now = [0.0]
+    llm = OpenAICompatLLM(fake_vllm.url, model="fake-gemma", timeout=600, deadline=1000.0, clock=lambda: now[0])
+    assert llm._timeout() == 500       # 剩余时间的一半
+    now[0] = 900
+    assert llm._timeout() == 60        # 至少 60 秒
+    llm.deadline = None
+    assert llm._timeout() == 600

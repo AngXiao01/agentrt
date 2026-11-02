@@ -92,6 +92,11 @@ class RunResult:
 MAX_PARALLEL = 10  # 源码 MAX_TOOL_USE_CONCURRENCY 默认值
 INTERRUPT_MSG = "[用户中断了本次请求]"
 MAX_LENGTH_NUDGES = 3   # 连续被截断且没有调用时，最多提醒几次再放弃
+LENGTH_NUDGE = ("（上一条输出触到长度上限被截断，没有给出调用或答复。少想一点，直接调用工具推进；"
+                "大文件拆成多次 write_file / edit_file。）")
+WRAPUP_AT = 0.8   # 时限用掉这么多时提醒收尾（Hermes 的 run_budget_seconds 也是 80%）
+WRAPUP_NOTE = ("（时间提醒：这个任务的时限已经用掉 80%，还剩约 {left} 秒，到点会被直接终止。停止新的探索和验证，"
+               "用现有进展把任务要求的产物（文件、配置、输出）落到最终状态，只做必须的写入。）")
 INTERRUPT_TOOL = "[中断] 用户中断，这个调用没有执行。"
 INTERRUPTED = ("[中断] 上次执行在返回结果之前被中断，结果未知（可能已经生效，也可能没有）。"
                "先检查当前状态，再决定要不要重做。")
@@ -115,9 +120,11 @@ class Agent:
                  context: Optional[ContextManager] = None, max_turns: int = 30,
                  bash_timeout: float = 30.0, volatile_prefix: bool = False,
                  on_event: Optional[Callable[[dict], None]] = None, extra_prompt: str = "",
-                 sandbox=None, prompt: Optional[dict] = None, price: Optional[dict] = None):
+                 sandbox=None, prompt: Optional[dict] = None, price: Optional[dict] = None,
+                 deadline: Optional[float] = None):
         """sandbox：工具的执行环境（sandboxes.py），给 coding_tools 用；prompt：覆盖 system prompt 的各段
-        （intro / rules / text_protocol / native_protocol）；price：每百万 tokens 的美元价格 {"input", "cached", "output"}。"""
+        （intro / rules / text_protocol / native_protocol）；price：每百万 tokens 的美元价格 {"input", "cached", "output"}；
+        deadline：任务的绝对截止时间（epoch 秒），时限用掉 80% 时提醒模型收尾。"""
         self.llm = llm
         self.ctx = ToolContext(Path(workspace).resolve(), bash_timeout=bash_timeout, sandbox=sandbox)
         self.ctx.workspace.mkdir(parents=True, exist_ok=True)
@@ -132,6 +139,7 @@ class Agent:
         self.approver = approver
         self.cm = context or ContextManager(llm)
         self.max_turns = max_turns
+        self.deadline = deadline
         self.volatile_prefix = volatile_prefix  # 仅用于对照实验：每轮在前缀里塞时间戳
         self.on_event = on_event
         self.native = bool(getattr(llm, "native_tools", False))
@@ -143,6 +151,9 @@ class Agent:
         self._recent_sigs: list[tuple] = []
         self._empty_nudged = False
         self._length_nudges = 0   # 连续因长度上限被截断、没有任何工具调用的次数
+        self._can_think_off = bool(getattr(llm, "think_off", None))   # 端点支持单次关思考
+        self._started: Optional[float] = None   # 本次 run / send / resume 开始的时间，收尾提示按它算用掉的比例
+        self._wrapup_sent = False
         self.result = RunResult(session_id=log.session_id)
         self._lock = threading.RLock()  # 只读工具并行执行时保护事件日志和计数器
         self._cancel = threading.Event()  # 用户中断（对应 Claude Code 的 abortController）
@@ -194,7 +205,7 @@ class Agent:
         params = self.llm.params() if hasattr(self.llm, "params") else {}
         return {"type": "session_start", "task": task, "workspace": str(self.ctx.workspace),
                 "model": getattr(self.llm, "model", ""), "mode": self.perms.mode,
-                "native_tools": self.native, "max_turns": self.max_turns,
+                "native_tools": self.native, "max_turns": self.max_turns, "deadline": self.deadline,
                 "backend": getattr(self.llm, "backend", "vllm"), "llm_params": params,
                 "sandbox": {"kind": self.sandbox.kind, "workdir": self.sandbox.workdir,
                             "enforcement": self.sandbox.enforcement, "disposable": self.sandbox.disposable}
@@ -278,6 +289,7 @@ class Agent:
 
     # ------------------------------------------------------------ 主循环
     def _drive(self, messages: list[dict], t0: float) -> RunResult:
+        self._started = t0
         try:
             status = self._loop(messages)
         except LLMError as e:
@@ -292,16 +304,33 @@ class Agent:
     def _loop(self, messages: list[dict]) -> str:
         r = self.result
         turns = 0
+        think = True
         while True:
             if self._cancel.is_set():
                 return self._interrupted(messages)
             if turns >= self.max_turns:
                 return "max_turns"
+            self._maybe_wrapup(messages)
             messages = self._maybe_compact(messages)
-            res, messages = self._call_model(messages)
+            res, messages = self._call_model(messages, think)
+            think = True
             self._live = messages
             turns += 1
             r.turns = turns
+
+            if res.finish_reason == "length" and not (res.tool_calls or res.parse_errors or res.content.strip()):
+                # 只有思考就被截断：思考吃满了输出预算。这条回复不进上下文——按 reasoning_replay 它会跟着之后
+                # 每一次请求发出去（TB2 整场只有一条用户消息，turn 等于全部回传）。对照 Hermes 的 turn_truncation：
+                # 同样的上下文再请求一次，这一次关掉思考；端点关不了思考才退回到提示“少想一点”
+                self._drop_reply(res)
+                self._length_nudges += 1
+                if self._length_nudges > MAX_LENGTH_NUDGES:
+                    return "truncated"
+                if self._can_think_off:
+                    think = False
+                else:
+                    messages.append(self._user_note(LENGTH_NUDGE))
+                continue
 
             asst = self._asst_message(res)
             if res.parse_errors:
@@ -310,14 +339,12 @@ class Agent:
             self._emit({"type": "message", "message": asst})
 
             if not res.tool_calls and not res.parse_errors:
-                if res.finish_reason == "length":   # 被截断不是“做完了”：思考占满输出预算时正文和调用都是空的
+                if res.finish_reason == "length":   # 正文写到一半被截断，也不是“做完了”
                     self._length_nudges += 1
                     if self._length_nudges > MAX_LENGTH_NUDGES:
                         r.final = res.content
                         return "truncated"
-                    messages.append(self._user_note(
-                        "（上一条输出触到长度上限被截断，没有给出调用或答复。少想一点，直接调用工具推进；"
-                        "大文件拆成多次 write_file / edit_file。）"))
+                    messages.append(self._user_note(LENGTH_NUDGE))
                     continue
                 self._length_nudges = 0
                 if not res.content.strip() and not self._empty_nudged:
@@ -327,6 +354,8 @@ class Agent:
                 r.final = res.content
                 return "end_turn"
 
+            if res.tool_calls:
+                self._length_nudges = 0   # 只数连续的截断：中间有过调用就重新计
             for batch in self._batches(res.tool_calls):
                 if self._cancel.is_set():  # 每个 tool_use 都必须有 tool_result，否则下次请求的上下文不合法
                     messages += [self._tool_result(c, INTERRUPT_TOOL, error=True) for c in batch]
@@ -407,15 +436,32 @@ class Agent:
                     "after_tokens": self.cm.estimate(after), "messages": after,
                     "summary_usage": u if (u["prompt"] or u["completion"]) else None})
 
-    def _call_model(self, messages: list[dict]):
+    def _maybe_wrapup(self, messages: list[dict]) -> None:
+        """时限用掉 WRAPUP_AT 时提醒一次收尾。追加在末尾（harness 消息不算新一轮），前缀不变，KV cache 照样命中。"""
+        if self.deadline is None or self._started is None or self._wrapup_sent:
+            return
+        now = time.time()
+        if now - self._started < WRAPUP_AT * (self.deadline - self._started):
+            return
+        self._wrapup_sent = True
+        messages.append(self._user_note(WRAPUP_NOTE.format(left=max(0, int(self.deadline - now)))))
+
+    def _drop_reply(self, res) -> None:
+        """这次的回复不进上下文。照样写进日志（模型生成的东西都能从日志里找到），但 ReplayState 不会把它当消息。"""
+        self._sent.pop()      # _chat 假定回复会追加进下一次请求；没追加，下一次请求仍以这次为前缀，不算前缀改写
+        self.cm.drop_reply()
+        self._emit({"type": "dropped_reply", "serial": self._serial, "finish_reason": res.finish_reason,
+                    "content": res.content, "reasoning": res.reasoning})
+
+    def _call_model(self, messages: list[dict], think: bool = True):
         try:
-            return self._chat(messages), messages
+            return self._chat(messages, think), messages
         except ContextLengthError:
             new = self.cm.reactive_compact(messages)
             if new is None:
                 raise
             self._record_compact(messages, new, "reactive")
-            return self._chat(new), new  # 只重试一次，再超长就交给上层
+            return self._chat(new, think), new  # 只重试一次，再超长就交给上层
 
     @staticmethod
     def _asst_message(res) -> dict:
@@ -453,7 +499,8 @@ class Agent:
                 return i
         return None if len(cur) >= len(prev) else len(cur)
 
-    def _chat(self, messages: list[dict]):
+    def _chat(self, messages: list[dict], think: bool = True):
+        """think=False：这一次请求关掉思考（只在端点配了 think_off 时才会走到）。"""
         self._serial += 1
         send = messages
         stamp = None
@@ -462,7 +509,8 @@ class Agent:
             send = [{**messages[0], "content": f"当前时间：{stamp}\n\n{messages[0]['content']}"}] + messages[1:]
         brk = self._prefix_break(send)
         t0 = time.time()
-        res = self.llm.chat(send, self._schemas if self.native else None, call_prefix=f"t{self._serial}")
+        res = self.llm.chat(send, self._schemas if self.native else None, call_prefix=f"t{self._serial}",
+                            **({} if think else {"think": False}))
         dt = time.time() - t0
         u = normalize_usage(res.usage)
         self.cm.note_usage(len(send), u["prompt"], u["completion"])
@@ -483,6 +531,8 @@ class Agent:
                 "cached_tokens": u["cached"], "reasoning_tokens": u["reasoning"],
                 "est_context_tokens": self.cm.estimate(messages), "n_messages": len(send),
                 "prefix_break": brk, "finish_reason": res.finish_reason, "n_calls": len(res.tool_calls)}
+        if not think:
+            span["think"] = False
         if stamp:
             span["volatile_stamp"] = stamp   # 模型看到的东西都要能从日志重建
         self._emit(span)

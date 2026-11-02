@@ -15,6 +15,8 @@ from .llm import LLMError, OpenAICompatLLM
 BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "qwen/qwen3.7-flash"
 _KEY_RE = re.compile(r"sk-or-v\d+-[A-Za-z0-9]+")
+# 单次关思考：DeepSeek V4.1 Flash 在 OpenRouter 上不认 reasoning.max_tokens / effort，只认 enabled=false
+THINK_OFF = {"reasoning": {"enabled": False}}
 
 
 def read_key() -> str:
@@ -44,6 +46,7 @@ class OpenRouterLLM(OpenAICompatLLM):
 
     def __init__(self, model: Optional[str] = None, **kw):
         self._wanted = pick_model(model)
+        kw.setdefault("think_off", THINK_OFF)
         super().__init__(os.environ.get("OPENROUTER_BASE_URL", BASE_URL), model=self._wanted,
                          api_key=read_key(), **kw)
 

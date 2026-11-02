@@ -145,6 +145,8 @@ Manus 六条原则的落点：
 | 执行环境丢失 | 作为工具错误回填；Docker 下一次调用重新 provision |
 | 日志最后一行写了一半 | 读取时丢弃 |
 | JSON 不合法 / 触到 max_tokens / 空回复 | 回填错误或提示，让模型自己修正 |
+| 只有思考就触到 max_tokens | 这条回复不进上下文（只记 `dropped_reply` 事件），同样的上下文再请求一次、单次关掉思考（`think_off`）；端点关不了思考时提示“少想一点”。连续 3 次后以 `truncated` 结束 |
+| 任务有时限（`deadline`） | 用掉 80% 时提醒一次收尾；单次模型请求最多等剩余时间的一半（至少 60 秒） |
 | 工具异常 / 超时 | 异常回填；超时终止整个进程组 |
 | 死循环 | 相同调用提示 + `max_turns` 上限 |
 
@@ -179,6 +181,8 @@ harbor run -d terminal-bench@2.0 -a agentrt.bench.harbor_agent:AgentRT -m deepse
 - `-m` 的前缀决定默认端点：`deepseek` / `openrouter` / `openai` / `moonshot` / `qwen`。
 - key 依次读 `AGENTRT_API_KEY`、`DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY` 等。
 - 每个 trial 的事件日志在 `<job>/<trial>/agent/agentrt.jsonl`；token、缓存、成本、前缀改写次数写进 Harbor 的 `AgentContext`。
+- Harbor 不把 agent 时限告诉外部 agent：agentrt 从 trial 的 `config.json` 和任务的 `task.toml` 按 Harbor 的算法（覆盖值、上限、倍率）重算，`--ak time_budget=<秒>` 可以覆盖，`0` 表示不设。
+- `-m openrouter/...` 默认 `think_off={"reasoning": {"enabled": false}}`；别的端点要单次关思考就自己传，比如 vLLM 上的 Qwen3 用 `{"chat_template_kwargs": {"enable_thinking": false}}`。
 - 价格不写死，按厂商当前价目传入。
 
 一键版：依次做预检、固定 TB2 版本、按难度分层抽子集、跑 oracle、跑 agentrt、跑同模型基线、汇总。
