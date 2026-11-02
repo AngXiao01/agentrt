@@ -21,7 +21,7 @@ agentrt/
   sandbox.py       macOS sandbox-exec 配置 + 只读命令判定
   subagent.py      只读子 agent（delegate）
   mcp.py           MCP stdio 客户端
-  bench/           harbor_agent（Harbor 外部 agent）、preflight、tb2（固定版本 + 分层子集）、report、stats
+  bench/           harbor_agent（Harbor 外部 agent）、preflight、tb2（固定版本 + 分层子集）、report、stats、browse（网页跑分页）
   trace.py         会话摘要与时间线
   cli.py           ping / run / resume / trace / sessions / assistant / web
 evals/             8 个本地任务 + 多配置对照
@@ -271,7 +271,12 @@ python3 -m agentrt assistant --workspace <目录>                 # 终端交互
 python3 -m agentrt assistant --workspace <目录> --mode plan     # 只读
 python3 -m agentrt web --workspace <目录>                       # 网页界面（127.0.0.1 + 随机 token）
 python3 -m agentrt web --resume <会话id>                        # 崩溃后接着干
+python3 -m agentrt web --runs-dir <目录>                        # “跑分”页读的目录，默认仓库里的 runs/
 ```
+
+网页顶上有两页：**对话**（文件助手；工作范围、权限模式、模型都能在页面上改）和**跑分**（只读浏览 `run_tb2.sh`
+的输出：每次跑分的通过数和花费 → 每个 trial 的结果、用时 / 时限、tokens → 单个 trial 的时间线，包括每次模型调用、
+工具调用和输出、被截断丢弃的思考、关思考重试、时间提醒、判分输出）。
 
 - **工具**：只读的有 `list_dir` `find_files` `file_stats` `grep` `read_file` `find_duplicates`；会改动文件的有 `move_file` `copy_file` `trash`；另有 `delegate`（只读子 agent）和沙箱 bash。
 - **没有永久删除**：`trash` 放进系统废纸篓，`AGENTRT_TRASH_DIR` 可改为指定目录；move / copy 不覆盖已有文件。

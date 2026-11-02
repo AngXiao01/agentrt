@@ -175,7 +175,8 @@ def cmd_web(a) -> None:
     llm = OpenRouterLLM(a.model, temperature=a.temperature, max_tokens=a.max_tokens, max_retries=a.retries)
     resume = _session_path(a.resume, a.sessions_dir) if a.resume else None
     serve(llm, Path(a.workspace).expanduser().resolve(), a.mode, a.sessions_dir, port=a.port,
-          open_browser=not a.no_open, resume=resume, bash=not a.no_bash)
+          open_browser=not a.no_open, resume=resume, bash=not a.no_bash,
+          runs_dir=Path(a.runs_dir).expanduser().resolve())
 
 
 def cmd_resume(a) -> None:
@@ -280,7 +281,7 @@ def main(argv=None) -> None:
     agent_opts(sp)
     sp.set_defaults(fn=cmd_assistant)
 
-    sp = sub.add_parser("web", help="文件助手的网页界面（OpenRouter）")
+    sp = sub.add_parser("web", help="网页界面：文件助手对话 + 跑分浏览（OpenRouter）")
     sp.add_argument("--workspace", default="~", help="初始工作范围，网页里可以改")
     sp.add_argument("--mode", choices=MODES, default="default")
     sp.add_argument("--port", type=int, default=8765)
@@ -291,6 +292,8 @@ def main(argv=None) -> None:
     sp.add_argument("--max-tokens", type=int, default=2048)
     sp.add_argument("--retries", type=int, default=3)
     sp.add_argument("--no-bash", action="store_true")
+    sp.add_argument("--runs-dir", default=str(Path(__file__).resolve().parents[1] / "runs"),
+                    help="“跑分”页读的目录（run_tb2.sh 的输出），默认仓库里的 runs/")
     sp.set_defaults(fn=cmd_web)
 
     sp = sub.add_parser("resume", help="从会话日志断点继续")

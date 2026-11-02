@@ -3,12 +3,56 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>文件助手</title>
+<title>agentrt</title>
 <style>
 :root{--bg:#f6f5f2;--panel:#fff;--ink:#1f2328;--mute:#6b7280;--line:#e4e2dc;--accent:#c2552d;--accent-ink:#fff;--ok:#2f7d4f;--bad:#b3261e;--warn-bg:#fff6e5;--warn-line:#f0d9a8;--code:#f1efe9}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#1f1f1d;--ink:#ecebe6;--mute:#9a988f;--line:#33322e;--accent:#e0714a;--accent-ink:#1a1a18;--ok:#5fb383;--bad:#f07a70;--warn-bg:#2b2517;--warn-line:#5a4a22;--code:#2a2926}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;height:100vh;display:flex;flex-direction:column}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column}
+nav{display:flex;gap:4px}
+nav a{font-size:14px;padding:5px 12px;border-radius:8px;color:var(--mute);text-decoration:none}
+nav a.on{background:var(--code);color:var(--ink);font-weight:600}
+.view{display:none;flex:1;min-height:0;flex-direction:column}
+.view.on{display:flex}
+#chat-tools{display:contents}
+body:not(.chat) #chat-tools{display:none}
+#mdl{width:230px;font-family:ui-monospace,Menlo,monospace}
+#runs{flex:1;overflow-y:auto;padding:20px 16px}
+.wide{max-width:1100px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.crumbs{font-size:13px;color:var(--mute)}.crumbs a{color:var(--accent);text-decoration:none}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+a.card{color:inherit;text-decoration:none;display:block}a.card:hover{border-color:var(--mute)}
+.card h3{margin:0 0 6px;font-size:15px;font-family:ui-monospace,Menlo,monospace;font-weight:600;word-break:break-all}
+.arm{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;font-size:13px;color:var(--mute)}
+.arm b{color:var(--ink);font-size:15px}
+.big{font-size:20px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:600;font-size:12px}
+tr:last-child td{border-bottom:0}
+tr.link{cursor:pointer}tr.link:hover td{background:var(--code)}
+td.num,th.num{text-align:right}
+.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;font-weight:600}
+.p-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.p-fail,.p-agent_timeout{background:color-mix(in srgb,var(--bad) 15%,transparent);color:var(--bad)}
+.p-infra{background:var(--code);color:var(--mute)}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.stat span{display:block;font-size:12px;color:var(--mute)}
+.stat .big{font-size:17px}
+.bar{height:6px;border-radius:3px;background:var(--code);overflow:hidden;margin-top:6px}.bar i{display:block;height:100%;background:var(--accent)}
+.tl{display:flex;flex-direction:column;gap:6px}
+.ev{font-size:13px;border-left:2px solid var(--line);padding:3px 0 3px 10px}
+.ev .t{color:var(--mute);font-variant-numeric:tabular-nums;display:inline-block;min-width:58px}
+.ev pre,.card pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Menlo,monospace;max-height:280px;overflow:auto;background:var(--code);padding:8px;border-radius:8px;color:var(--ink)}
+.ev.llm{color:var(--mute);border-left-color:transparent}
+.ev.warn{background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:8px;padding:6px 10px}
+.ev.end{border-left-color:var(--ok)}
+.tag{font-size:11px;padding:0 6px;border-radius:5px;margin-left:4px;background:var(--code);color:var(--mute)}
+.tag.red{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.filters{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--mute)}
+.empty{color:var(--mute);text-align:center;padding:40px 0}
 header{display:flex;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
 header h1{font-size:16px;margin:0 8px 0 0;font-weight:650}
 header input,header select{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
@@ -53,22 +97,28 @@ button.stop{background:var(--bad);border-color:var(--bad);color:#fff}
 </head>
 <body>
 <header>
-  <h1>📁 文件助手</h1>
+  <h1>agentrt</h1>
+  <nav><a href="#chat" id="nav-chat">对话</a><a href="#runs" id="nav-runs">跑分</a></nav>
+  <span id="chat-tools">
   <input id="ws" placeholder="工作范围，如 ~/Downloads" spellcheck="false" aria-label="工作范围">
   <select id="mode" aria-label="权限模式">
     <option value="default">改动前确认</option>
     <option value="plan">只读</option>
     <option value="auto">自动执行（删除仍确认）</option>
   </select>
+  <input id="mdl" placeholder="模型，如 deepseek/deepseek-v4.1-flash" spellcheck="false" aria-label="模型">
   <button id="apply">应用</button>
   <button id="clear">清空对话</button>
-  <span class="badge" id="model"></span>
+  </span>
 </header>
+<section class="view" id="view-chat">
 <main id="main"><div class="col" id="log"></div></main>
 <footer><div class="col" style="flex-direction:column;align-items:stretch;gap:6px"><div id="status" class="status idle"><span id="glyph">●</span> <span id="stext">空闲，可以输入</span></div><div style="display:flex;gap:8px;align-items:flex-end">
   <textarea id="inp" rows="1" placeholder="告诉我想找什么、统计什么、清理什么…（Enter 发送，Shift+Enter 换行）"></textarea>
   <button class="primary" id="send">发送</button>
 </div></div></footer>
+</section>
+<section class="view" id="view-runs"><div id="runs"><div class="wide" id="runs-body"></div></div></section>
 <script>
 const T = new URLSearchParams(location.search).get("t");
 const $ = id => document.getElementById(id);
@@ -105,7 +155,7 @@ function argsBrief(a) {
 function setBusy(b) { busy = b; render(); }
 function applyState(s) {
   if (!s) return;
-  $("ws").value = s.workspace; $("mode").value = s.mode === "bypass" ? "auto" : s.mode; $("model").textContent = s.model;
+  $("ws").value = s.workspace; $("mode").value = s.mode === "bypass" ? "auto" : s.mode; $("mdl").value = s.model;
 }
 
 function handle(e) {
@@ -158,13 +208,119 @@ $("send").onclick = () => busy ? stop() : send();
 $("inp").addEventListener("input", fit);
 document.addEventListener("keydown", e => { if (e.key === "Escape" && busy) stop(); });
 $("inp").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
-$("apply").onclick = async () => { const r = await api("/api/config", {workspace: $("ws").value, mode: $("mode").value}); if (r.error) add("sys bad", esc(r.error)); };
+$("apply").onclick = async () => { const r = await api("/api/config", {workspace: $("ws").value, mode: $("mode").value, model: $("mdl").value}); if (r.error) add("sys bad", esc(r.error)); };
 $("clear").onclick = () => api("/api/clear", {});
 
 hero();
 api("/api/state").then(s => { applyState(s); if (s.busy) { busy = true; setPhase("think"); } });
 const es = new EventSource("/api/stream?t=" + T);
 es.onmessage = m => handle(JSON.parse(m.data));
+</script>
+<script>
+// ---------------------------------------------------------------- 跑分页：runs/ 下的 TB2 结果和每个 trial 的时间线
+const RB = $("runs-body");
+const rget = (p, q) => fetch(p + "?t=" + T + Object.entries(q || {}).map(([k, v]) => "&" + k + "=" + encodeURIComponent(v)).join("")).then(r => r.json());
+const k = n => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+const usd = x => x == null ? "—" : "$" + (x < 0.01 ? x.toFixed(4) : x.toFixed(3));
+const sec = x => x == null ? "—" : x >= 60 ? Math.floor(x / 60) + "m" + String(Math.round(x % 60)).padStart(2, "0") + "s" : Math.round(x) + "s";
+const OUT = {ok: "通过", fail: "失败", agent_timeout: "超时", infra: "基础设施"};
+const pill = o => `<span class="pill p-${o}">${OUT[o] || o}</span>`;
+const href = (...parts) => "#runs/" + parts.map(encodeURIComponent).join("/");
+
+function route() {
+  const h = location.hash.slice(1) || "chat", parts = h.split("/").map(decodeURIComponent);
+  const runs = parts[0] === "runs";
+  document.body.classList.toggle("chat", !runs);
+  $("view-chat").classList.toggle("on", !runs); $("view-runs").classList.toggle("on", runs);
+  $("nav-chat").classList.toggle("on", !runs); $("nav-runs").classList.toggle("on", runs);
+  if (!runs) return scroll();
+  RB.innerHTML = `<div class="empty">读取中…</div>`;
+  (parts[2] ? showTrial(parts[1], parts.slice(2).join("/")) : parts[1] ? showRun(parts[1]) : showRuns())
+    .catch(e => RB.innerHTML = `<div class="empty bad">读取失败：${esc(String(e))}</div>`);
+  $("runs").scrollTop = 0;
+}
+window.addEventListener("hashchange", route);
+
+async function showRuns() {
+  const {runs} = await rget("/api/runs");
+  if (!runs.length) { RB.innerHTML = `<div class="empty">runs 目录里还没有跑分结果（用 --runs-dir 指定目录）</div>`; return; }
+  RB.innerHTML = `<div class="crumbs">全部跑分 · ${runs.length} 次</div>` + runs.map(r => `<a class="card" href="${href(r.name)}">
+    <h3>${esc(r.name)}</h3>
+    ${r.arms.map(a => `<div class="arm"><b>${esc(a.agent)}</b><span>${esc(a.model || "")}</span>
+      <span class="big">${a.success}/${a.valid}</span>
+      ${a.agent_timeouts ? `<span>超时 ${a.agent_timeouts}</span>` : ""}${a.infra_failures ? `<span>基础设施失败 ${a.infra_failures}</span>` : ""}
+      ${a.cost_usd != null ? `<span>${usd(a.cost_usd)}</span>` : ""}</div>`).join("")}
+    <div class="crumbs">${new Date(r.mtime * 1000).toLocaleString()} · ${r.trials} 个 trial${r.broken_tasks.length ? ` · oracle 判不了：${esc(r.broken_tasks.join(", "))}` : ""}</div></a>`).join("");
+}
+
+async function showRun(name) {
+  const r = await rget("/api/run", {name});
+  if (r.error) { RB.innerHTML = `<div class="empty bad">${esc(r.error)}</div>`; return; }
+  const rows = r.trials.map(x => `<tr class="link" data-id="${esc(x.id)}">
+    <td>${esc(x.task)}</td><td>${pill(x.outcome)}${x.exception ? `<span class="tag">${esc(x.exception)}</span>` : ""}</td>
+    <td class="num">${sec(x.agent_seconds)}${x.time_budget ? ` / ${sec(x.time_budget)}` : ""}</td>
+    <td class="num">${x.turns ?? "—"}</td><td class="num">${k(x.input_tokens)}</td>
+    <td class="num">${x.input_tokens ? Math.round(100 * (x.cache_tokens || 0) / x.input_tokens) + "%" : "—"}</td>
+    <td class="num">${k(x.output_tokens)}</td><td class="num">${usd(x.cost_usd)}</td>
+    <td>${esc(x.agent)}${x.agent === "oracle" ? "" : `<span class="tag">${esc(x.model.split("/").pop())}</span>`}</td></tr>`).join("");
+  RB.innerHTML = `<div class="crumbs"><a href="#runs">全部跑分</a> / ${esc(r.name)}</div>
+    <div class="tbl"><table><thead><tr><th>任务</th><th>结果</th><th class="num">用时 / 时限</th><th class="num">轮数</th>
+    <th class="num">输入</th><th class="num">缓存</th><th class="num">输出</th><th class="num">花费</th><th>agent</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${r.report ? `<details class="card"><summary>report.md</summary><pre>${esc(r.report)}</pre></details>` : ""}`;
+  RB.querySelectorAll("tr.link").forEach(tr => tr.onclick = () => location.hash = href(name, tr.dataset.id));
+}
+
+async function showTrial(run, id) {
+  const r = await rget("/api/trial", {run, id});
+  if (r.error) { RB.innerHTML = `<div class="empty bad">${esc(r.error)}</div>`; return; }
+  const ar = r.agent_result || {}, m = ar.metadata || {}, tl = r.timeline;
+  const start = tl.find(e => e.kind === "start") || {}, last = tl.length ? tl[tl.length - 1].at : 0;
+  const budget = m.time_budget || start.budget, llm = tl.filter(e => e.kind === "llm");
+  const dropped = tl.filter(e => e.kind === "dropped").length, off = llm.filter(e => e.think === false).length;
+  const stat = (label, val, extra) => `<div class="stat"><span>${label}</span><b class="big">${val}</b>${extra || ""}</div>`;
+  const results = {}; tl.forEach(e => { if (e.kind === "result") results[e.id] = e; });
+  RB.innerHTML = `<div class="crumbs"><a href="#runs">全部跑分</a> / <a href="${href(run)}">${esc(run)}</a> / ${esc(r.task)}</div>
+    <div class="stats">
+      ${stat("结果", pill(r.outcome))}
+      ${stat("用时 / 时限", `${sec(last)}${budget ? " / " + sec(budget) : ""}`, budget ? `<div class="bar"><i style="width:${Math.min(100, 100 * last / budget)}%"></i></div>` : "")}
+      ${stat("模型调用", llm.length, `<span>模型 ${sec(llm.reduce((s, e) => s + (e.seconds || 0), 0))}</span>`)}
+      ${stat("截断丢弃 / 关思考重试", `${dropped} / ${off}`)}
+      ${stat("输入 · 缓存", k(ar.n_input_tokens), `<span>缓存 ${ar.n_input_tokens ? Math.round(100 * (ar.n_cache_tokens || 0) / ar.n_input_tokens) : 0}%</span>`)}
+      ${stat("输出", k(ar.n_output_tokens), `<span>思考 ${k(m.reasoning_tokens)}</span>`)}
+      ${stat("花费", usd(ar.cost_usd))}
+    </div>
+    ${r.exception ? `<div class="card"><b class="bad">${esc(r.exception.exception_type || "")}</b><pre>${esc(r.exception.exception_message || "")}</pre></div>` : ""}
+    <details class="card"><summary>判分输出</summary><pre>${esc(r.verifier || "（没有）")}</pre></details>
+    <details class="card"><summary>agent 参数</summary><pre>${esc(JSON.stringify(r.kwargs, null, 2))}</pre></details>
+    <div class="filters"><label><input type="checkbox" id="f-llm" checked> 显示每次模型调用</label>
+      <label><input type="checkbox" id="f-think"> 展开思考内容</label></div>
+    <div class="tl" id="tl">${tl.length ? "" : `<div class="empty">这个 trial 没有 agentrt.jsonl</div>`}</div>`;
+  const draw = () => {
+    const showLLM = $("f-llm").checked, open = $("f-think").checked ? " open" : "";
+    const t = e => `<span class="t">${sec(e.at)}</span>`;
+    $("tl").innerHTML = tl.map(e => {
+      switch (e.kind) {
+        case "start": return `<div class="ev">${t(e)}<b>开始</b> ${esc(e.model || "")}${e.budget ? ` · 时限 ${sec(e.budget)}` : ""}
+          <details><summary>任务描述</summary><pre>${esc(e.task)}</pre></details></div>`;
+        case "llm": return showLLM ? `<div class="ev llm">${t(e)}#${e.serial} 模型 ${(e.seconds || 0).toFixed(1)}s · 输入 ${k(e.prompt)}（缓存 ${e.prompt ? Math.round(100 * (e.cached || 0) / e.prompt) : 0}%）· 输出 ${k(e.completion)}${e.reasoning ? `（思考 ${k(e.reasoning)}）` : ""}
+          ${e.finish === "length" ? `<span class="tag red">截断</span>` : ""}${e.think === false ? `<span class="tag">关思考</span>` : ""}${e.prefix_break != null ? `<span class="tag">缓存断点 ${e.prefix_break}</span>` : ""}</div>` : "";
+        case "assistant": return (e.content.trim() || e.reasoning) ? `<div class="ev">${t(e)}${e.content.trim() ? esc(e.content.trim()) : `<span class="badge">（只有思考）</span>`}
+          ${e.reasoning ? `<details${open}><summary>思考 ${k(e.reasoning.length)} 字符</summary><pre>${esc(e.reasoning)}</pre></details>` : ""}</div>` : "";
+        case "tool": { const res = results[e.id]; let args = e.args; try { const a = JSON.parse(e.args); args = a.command || (a.path ? a.path + (a.content ? "\n" + a.content : "") : e.args); } catch (_) {}
+          return `<div class="ev">${t(e)}<b>${esc(e.name)}</b>${res ? ` <span class="${res.error ? "bad" : "good"}">${res.error ? "出错" : "✓"}</span> <span class="badge">${(res.seconds || 0).toFixed(1)}s</span>` : ` <span class="badge">（没有结果）</span>`}
+            <pre>${esc(args)}</pre>${res ? `<details><summary>${esc(res.content.split("\n").slice(0, 2).join(" ").slice(0, 120))}</summary><pre>${esc(res.content)}</pre></details>` : ""}</div>`; }
+        case "dropped": return `<div class="ev warn">${t(e)}<b>只思考没动作，被截断，已丢弃</b><details${open}><summary>被丢弃的思考</summary><pre>${esc(e.reasoning)}</pre></details></div>`;
+        case "harness": return `<div class="ev warn">${t(e)}<b>harness 提醒</b> ${esc(e.text)}</div>`;
+        case "note": return `<div class="ev warn">${t(e)}${esc(e.text)}</div>`;
+        case "end": return `<div class="ev end">${t(e)}<b>结束：${esc(e.status || "")}</b><pre>${esc(e.final || "（没有最终答复）")}</pre></div>`;
+        default: return "";
+      }
+    }).join("") || $("tl").innerHTML;
+  };
+  if (tl.length) { draw(); $("f-llm").onchange = draw; $("f-think").onchange = draw; }
+}
+
+route();
 </script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-"""Web 界面：浏览器里对话，让助手搜索 / 统计 / 整理 / 删除符合条件的文件。
+"""Web 界面：浏览器里对话，让助手搜索 / 统计 / 整理 / 删除符合条件的文件；另有“跑分”页浏览 runs/ 下的 TB2 结果。
 
 只依赖标准库。服务只监听 127.0.0.1，并要求启动时随机生成的 token（防止本机其他网页偷偷调用）。
 进度通过 SSE 实时推送；会修改文件的操作会弹出确认卡片，等你点“允许”才执行。
@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .assistant import build_assistant
+from .bench import browse
 from .context import ContextManager
 from .permissions import MODES, PermissionEngine
 from .session import EventLog
@@ -80,7 +81,7 @@ class WebSession:
         return {"workspace": str(a.ctx.workspace), "mode": a.perms.mode, "model": getattr(self.llm, "model", "?"),
                 "busy": self.busy, "modes": list(MODES)}
 
-    def set_config(self, workspace: str, mode: str) -> str:
+    def set_config(self, workspace: str, mode: str, model: str = "") -> str:
         if self.busy:
             return "助手正在工作，稍后再改"
         ws = Path(workspace).expanduser()
@@ -88,8 +89,15 @@ class WebSession:
             return f"目录不存在：{workspace}"
         if mode not in MODES:
             return f"未知模式：{mode}"
+        model = model.strip()
+        if model and (len(model) > 200 or any(c.isspace() for c in model)):
+            return f"模型 id 不对：{model}"
+        if model and model != self.llm.model:   # 同一个 LLM 对象换模型 id；OpenRouter 上 id 不对会在第一次请求时报错
+            self.llm.model = model
+            if hasattr(self.llm, "_wanted"):
+                self.llm._wanted = model
         self.configure(ws.resolve(), mode)
-        self.emit("system", text=f"工作范围：{ws.resolve()}　模式：{mode}", state=self.state())
+        self.emit("system", text=f"工作范围：{ws.resolve()}　模式：{mode}　模型：{self.llm.model}", state=self.state())
         return ""
 
     # -------------------------------------------------------- 运行
@@ -186,7 +194,7 @@ def replay_ui_events(events: list[dict]) -> list[dict]:
     return out
 
 
-def make_handler(sess: WebSession, token: str, port: int):
+def make_handler(sess: WebSession, token: str, port: int, runs_dir: Optional[Path] = None):
     html = resources.files("agentrt").joinpath("web_ui.html").read_text(encoding="utf-8")
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
 
@@ -217,11 +225,24 @@ def make_handler(sess: WebSession, token: str, port: int):
         def do_GET(self):
             if not self._authed():
                 return
-            path = urlparse(self.path).path
+            url = urlparse(self.path)
+            path, q = url.path, {k: v[0] for k, v in parse_qs(url.query).items()}
             if path == "/":
                 self._send(200, html.encode(), "text/html")
             elif path == "/api/state":
-                self._json(sess.state())
+                self._json({**sess.state(), "runs_dir": str(runs_dir) if runs_dir else None})
+            elif path == "/api/runs":
+                self._json({"runs": browse.list_runs(runs_dir) if runs_dir else []})
+            elif path in ("/api/run", "/api/trial"):
+                data = None
+                if runs_dir and path == "/api/run":
+                    data = browse.run_detail(runs_dir, q.get("name", ""))
+                elif runs_dir:
+                    data = browse.trial_detail(runs_dir, q.get("run", ""), q.get("id", ""))
+                if data is None:
+                    self._json({"error": "没有这个跑分"}, 404)
+                else:
+                    self._json(data)
             elif path == "/api/stream":
                 self._stream()
             else:
@@ -262,7 +283,8 @@ def make_handler(sess: WebSession, token: str, port: int):
                 err = "" if sess.answer(str(body.get("id")), bool(body.get("ok")), bool(body.get("always"))) \
                     else "这个确认已失效"
             elif path == "/api/config":
-                err = sess.set_config(str(body.get("workspace", "")), str(body.get("mode", "default")))
+                err = sess.set_config(str(body.get("workspace", "")), str(body.get("mode", "default")),
+                                      str(body.get("model") or ""))
             elif path == "/api/stop":
                 sess.stop()
                 err = ""
@@ -277,13 +299,13 @@ def make_handler(sess: WebSession, token: str, port: int):
 
 
 def serve(llm, workspace: Path, mode: str, sessions_dir: Path, port: int = 8765, open_browser: bool = True,
-          resume: Optional[Path] = None, extra_tools=None, bash: bool = True) -> None:
+          resume: Optional[Path] = None, extra_tools=None, bash: bool = True, runs_dir: Optional[Path] = None) -> None:
     sess = WebSession(llm, workspace, mode, sessions_dir, resume, extra_tools, bash)
     token = secrets.token_urlsafe(16)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sess, token, port))
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sess, token, port, runs_dir))
     httpd.daemon_threads = True
     url = f"http://127.0.0.1:{port}/?t={token}"
-    print(f"文件助手已启动：{url}\n模型 {llm.model}　范围 {sess.agent.ctx.workspace}　Ctrl+C 退出", flush=True)
+    print(f"agentrt 网页已启动：{url}\n模型 {llm.model}　范围 {sess.agent.ctx.workspace}　跑分 {runs_dir}　Ctrl+C 退出", flush=True)
     if open_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
     try:
