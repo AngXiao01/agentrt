@@ -7,13 +7,16 @@
   缓冲 13,000 tokens；预算较小时按预算的 25% 封顶。
 - reactive compact：服务端报上下文超长时，用更激进的参数立刻压一次再重试。
 
-system prompt 始终保持不变（不放时间戳等易变内容），压缩只替换中间的历史，
-其余时候上下文只追加不修改，尽量复用 KV cache。
+日志只追加。压缩不改写已经写下的消息，只追加一条 compact 事件（切点、结构化摘要、读过和改过的文件，
+或 microcompact 清掉的 tool_call_id）。模型看到的上下文是这条日志的投影：system + 最新摘要 + 切点之后的消息，
+再套上 microcompact 的占位符。system prompt 始终保持不变（不放时间戳等易变内容），
+除了这次投影变化，上下文只追加，尽量复用 KV cache。
 """
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
@@ -62,10 +65,70 @@ def truncate_middle(text: str, max_chars: int, hint: str = "") -> str:
 
 
 SUMMARY_PROMPT = (
-    "请把下面这段 agent 执行历史压缩成一份工作摘要，供后续继续执行任务使用。"
-    "必须保留：用户的原始任务、已经完成的步骤和结论、修改过的文件、遇到的错误及原因、尚未完成的事项。"
+    "请把下面这段 agent 执行历史压缩成一份工作摘要，供后续继续执行任务使用。\n"
+    "按这些小节输出，没有内容的写“无”：\n"
+    "## Goal\n## Constraints\n## Progress\n## Decisions\n## Next\n## Critical\n"
+    "必须保留：用户的原始任务、已经完成的步骤和结论、修改过的文件、遇到的错误及原因、尚未完成的事项。\n"
     "不要编造，不要输出工具调用标签。\n\n"
 )
+
+# 摘要里的文件清单不靠模型回忆：从被压掉的工具调用里提取，并跨次压缩累加。
+_READ_TOOLS = {"read_file", "grep", "glob", "list_dir", "find_files", "file_stats", "find_duplicates"}
+_WRITE_TOOLS = {"write_file", "edit_file", "move_file", "copy_file", "trash"}
+
+
+def _uniq(paths: list[str]) -> list[str]:
+    out: list[str] = []
+    for p in paths:
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def files_touched(messages: list[dict]) -> tuple[list[str], list[str]]:
+    """被摘要掉的跨度里，读过和改过的路径。bash 改了哪些文件无法从参数看出来，不猜。"""
+    read: list[str] = []
+    modified: list[str] = []
+    for m in messages:
+        for c in m.get("tool_calls") or []:
+            args = c.get("arguments") or {}
+            if not isinstance(args, dict):
+                continue
+            name = c.get("name") or ""
+            if name in _READ_TOOLS:
+                read.append(str(args.get("path") or args.get("pattern") or ""))
+            elif name in _WRITE_TOOLS:
+                for key in ("path", "src", "dst"):
+                    if args.get(key):
+                        modified.append(str(args[key]))
+    return _uniq(read), _uniq(modified)
+
+
+def render_summary(reason: str, summary: str, read_files: list[str], modified_files: list[str]) -> str:
+    """投影里代替被压掉历史的那条 user 消息。文件清单是 harness 算的，不进模型摘要正文。"""
+    parts = [f"[上下文已压缩（{reason}），以下是此前工作的摘要]", (summary or "").strip()]
+    if read_files or modified_files:
+        lines = ["## Files"]
+        if read_files:
+            lines.append("Read: " + ", ".join(read_files))
+        if modified_files:
+            lines.append("Modified: " + ", ".join(modified_files))
+        parts.append("\n".join(lines))
+    return "\n\n".join(p for p in parts if p)
+
+
+@dataclass
+class CompactPlan:
+    """一次压缩的结果。view 是当时的投影，供还没写日志的调用方用；真正落盘的是其余字段。"""
+
+    reason: str
+    view: list[dict]
+    first_kept_id: Optional[int] = None
+    retain_none: bool = False
+    summary: str = ""
+    read_files: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    cleared_ids: list[str] = field(default_factory=list)
 
 
 class ContextManager:
@@ -84,6 +147,9 @@ class ContextManager:
         self.enabled = enabled
         self.compactions = 0
         self.last_summary_usage: Optional[dict] = None   # 主循环取走后清空，用来给摘要调用记账
+        self.last_plan: Optional[CompactPlan] = None
+        self.read_files: list[str] = []       # 跨次摘要累加；resume 时由主循环从最后一条 compact 事件种回来
+        self.modified_files: list[str] = []
         self._anchor: Optional[tuple[int, int]] = None   # (到这条为止的消息数, 此时服务端报告的上下文 tokens)
         self._request_anchor: Optional[tuple[int, int]] = None   # 同一次调用、不含回复的锚点（见 drop_reply）
 
@@ -135,19 +201,34 @@ class ContextManager:
         # 摘要里如果带了工具调用标签，去掉，避免被当成调用执行
         return re.sub(r"</?tool_call>", "", res.content).strip()
 
-    def compact(self, messages: list[dict], keep: int, reason: str) -> Optional[list[dict]]:
-        if len(messages) <= keep + 2:
+    def compact(self, messages: list[dict], keep: int, reason: str,
+                sources: Optional[list[dict]] = None) -> Optional[list[dict]]:
+        """压出投影。sources 与 messages 逐条对应，给摘要用：microcompact 的占位符里没有原文。
+        保留的尾巴仍取 messages，占位符留在模型视图里。"""
+        self.last_plan = None
+        src = sources or messages
+        if len(messages) <= keep + 2 or len(src) != len(messages):
             return None
         cut = self._safe_boundary(messages, keep)
-        old, recent = messages[1:cut], messages[cut:]
+        old = src[1:cut]
+        recent = messages[cut:]
         if not old:
             return None
         summary = self._summarize(old)
         self.compactions += 1
         self._anchor = None
-        note = {"role": "user", "content": f"[上下文已压缩（{reason}），以下是此前工作的摘要]\n{summary}",
-                "kind": "summary"}
-        return [messages[0], note] + recent
+        span_read, span_mod = files_touched(old)
+        self.read_files = _uniq(self.read_files + span_read)
+        self.modified_files = _uniq(self.modified_files + span_mod)
+        note = {"role": "user", "kind": "summary",
+                "content": render_summary(reason, summary, self.read_files, self.modified_files)}
+        kept = messages[cut] if cut < len(messages) else None
+        view = [messages[0], note] + recent
+        self.last_plan = CompactPlan(
+            reason=reason, view=view, summary=summary,
+            first_kept_id=kept.get("id") if kept else None, retain_none=kept is None,
+            read_files=list(self.read_files), modified_files=list(self.modified_files))
+        return view
 
     @property
     def threshold(self) -> int:
@@ -155,20 +236,36 @@ class ContextManager:
             return int(self.max_context_tokens * self.compact_ratio)
         return self.max_context_tokens - min(AUTOCOMPACT_BUFFER_TOKENS, self.max_context_tokens // 4)
 
-    def maybe_autocompact(self, messages: list[dict]) -> Optional[tuple[list[dict], str]]:
-        """返回 (新消息, 原因) 或 None。先试 microcompact（不调模型）；还超阈值才让模型做摘要。"""
+    def maybe_autocompact(self, messages: list[dict],
+                          sources: Optional[list[dict]] = None) -> Optional[tuple[list[dict], str]]:
+        """返回 (投影, 原因) 或 None。先试 microcompact（不调模型）；还超阈值才让模型做摘要。
+        sources 是同一条视图、但工具结果是原文，只给摘要看。"""
+        self.last_plan = None
         if not self.enabled or self.count(messages) < self.threshold:
             return None
         cleared, n = clear_old_results(messages, self.mc_keep_recent)
         if n:
-            self._anchor = None   # 历史被改写，旧的用量锚点作废，回到粗估
+            self._anchor = None   # 投影变了，旧的用量锚点作废，回到粗估
         if n and self.estimate(cleared) < self.threshold:
+            self.last_plan = self._micro_plan(messages, cleared)
             return cleared, "microcompact"
-        # 摘要要看原始历史：microcompact 已经把旧工具结果换成了占位符，拿它做摘要等于什么都没看到
-        summarized = self.compact(messages, self.keep_recent, "autocompact")
+        # 摘要看原文：microcompact 的占位符里没有工具输出，拿它做摘要等于什么都没看到
+        summarized = self.compact(messages, self.keep_recent, "autocompact", sources)
         if summarized is not None:
             return summarized, "autocompact"
-        return (cleared, "microcompact") if n else None
+        if n:
+            self.last_plan = self._micro_plan(messages, cleared)
+            return cleared, "microcompact"
+        return None
 
-    def reactive_compact(self, messages: list[dict]) -> Optional[list[dict]]:
-        return self.compact(messages, max(2, self.keep_recent // 2), "reactive")
+    @staticmethod
+    def _micro_plan(before: list[dict], cleared: list[dict]) -> CompactPlan:
+        prev = {m.get("tool_call_id"): m.get("content") for m in before if m.get("role") == "tool"}
+        ids = [m["tool_call_id"] for m in cleared
+               if m.get("role") == "tool" and m.get("content") == CLEARED
+               and prev.get(m.get("tool_call_id")) != CLEARED]
+        return CompactPlan(reason="microcompact", view=cleared, cleared_ids=ids)
+
+    def reactive_compact(self, messages: list[dict],
+                         sources: Optional[list[dict]] = None) -> Optional[list[dict]]:
+        return self.compact(messages, max(2, self.keep_recent // 2), "reactive", sources)

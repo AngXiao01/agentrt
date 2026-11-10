@@ -3,7 +3,8 @@
 一组职责单一的工具（bash / read_file / write_file / edit_file / glob / grep / todo_write）：
 - read_file 输出 `行号<TAB>内容`，单行超长截断，默认一次 400 行（上下文预算小，保守一些）。
 - 改文件前必须先读，而且读完之后文件没被别的途径改过。这里记内容哈希而不是 mtime：
-  容器里的 mtime 精度和时钟都不可信。
+  容器里的 mtime 精度和时钟都不可信。哈希写成 file_state 事件，不放进消息列表，
+  压缩丢不掉；resume 按路径装回，不用让模型重读。
 - bash：工作目录在多次调用之间保持，不保持环境变量和 shell 状态。
 - 工具不碰宿主机文件系统；harness 自己的东西（超长输出落盘）写在 sandbox 的 /tmp 下，不污染任务目录
   （SWE-bench 取 git diff、Terminal-Bench 的测试都会看工作目录）。
@@ -38,15 +39,28 @@ def _digest(b: bytes) -> str:
 
 
 class FileState:
-    """read-before-write 的账本：路径 → 读到时的内容哈希。并行的只读调用会同时写它，所以加锁。"""
+    """read-before-write 的账本：路径 → 读到时的内容哈希。并行的只读调用会同时写它，所以加锁。
 
-    def __init__(self):
+    on_change(path, digest) 在锁外调用，由主循环把哈希追加成 file_state 事件。load 不触发它，
+    否则 resume 装回账本时会把同一批哈希再写一遍。
+    """
+
+    def __init__(self, on_change=None):
         self._seen: dict[str, str] = {}
         self._lock = threading.Lock()
+        self.on_change = on_change
 
     def saw(self, path: str, data: bytes) -> None:
+        digest = _digest(data)
         with self._lock:
-            self._seen[path] = _digest(data)
+            self._seen[path] = digest
+            cb = self.on_change
+        if cb:
+            cb(path, digest)
+
+    def load(self, digests: dict) -> None:
+        with self._lock:
+            self._seen.update(digests)
 
     def check(self, path: str, current: Optional[bytes]) -> Optional[str]:
         with self._lock:
@@ -63,7 +77,7 @@ class FileState:
 def _state(ctx: ToolContext) -> FileState:
     st = getattr(ctx, "file_state", None)
     if st is None:
-        st = ctx.file_state = FileState()
+        st = ctx.file_state = FileState(on_change=getattr(ctx, "on_file_state", None))
     return st
 
 

@@ -107,7 +107,10 @@ def timeline(events: list[dict]) -> str:
         elif typ == "turn_start":
             lines.append(f"{t}  ── 新一轮：{_short(e.get('text', ''), 60)}")
         elif typ == "compact":
-            lines.append(f"{t}  [compact:{e['reason']}] {e['before_tokens']} → {e['after_tokens']} tokens")
+            nread, nmod = len(e.get("read_files") or []), len(e.get("modified_files") or [])
+            files = f"  read {nread} / modified {nmod}" if nread or nmod else ""
+            kept = f"  keep@{e['first_kept_id']}" if e.get("first_kept_id") else ""
+            lines.append(f"{t}  [compact:{e['reason']}] {e['before_tokens']} → {e['after_tokens']} tokens{kept}{files}")
         elif typ == "message" and e["message"]["role"] == "user":
             lines.append(f"{t}  user: {_short(e['message']['content'])}")
         elif typ == "message" and e["message"]["role"] == "assistant" and not e["message"].get("tool_calls"):
