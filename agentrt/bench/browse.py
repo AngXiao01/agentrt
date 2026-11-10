@@ -124,8 +124,10 @@ def timeline_item(e: dict, t0: float) -> Optional[dict]:
         r = e.get("reasoning") or ""
         return {"kind": "dropped", "at": at, "reasoning": _clip(r), "reasoning_chars": len(r)}
     if t == "compact":
+        nread, nmod = len(e.get("read_files") or []), len(e.get("modified_files") or [])
+        files = f"，read {nread} / modified {nmod}" if nread or nmod else ""
         return {"kind": "note", "at": at,
-                "text": f"上下文压缩：{e.get('before_tokens')} → {e.get('after_tokens')} tokens（{e.get('reason')}）"}
+                "text": f"上下文压缩：{e.get('before_tokens')} → {e.get('after_tokens')} tokens（{e.get('reason')}）{files}"}
     if t == "end":
         st = e.get("stats") or {}
         return {"kind": "end", "at": at, "status": e.get("status"), "final": _clip(e.get("final") or ""),

@@ -45,6 +45,21 @@ def test_write_existing_file_requires_read_first(tmp_path):
     assert not r[2]["is_error"] and (tmp_path / "ws/a.py").read_text() == "x = 3\n"
 
 
+def test_resume_restores_read_ledger_without_rereading(tmp_path):
+    """读过的哈希在 file_state 事件里。进程换了之后直接 edit，不必再 read。"""
+    from agentrt.llm import RetryableError
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws/a.py").write_text("x = 1\n")
+    agent, _, sb, log = _agent(tmp_path, [call("read_file", path="a.py"), RetryableError("connection refused")])
+    assert agent.run("改 a.py").status == "error"
+    assert any(e["type"] == "file_state" for e in log.events())
+    llm2 = ScriptedLLM([call("edit_file", path="a.py", old="x = 1", new="x = 2"), "done"])
+    agent2 = build_coding_agent(llm2, sb, log, permissions=PermissionEngine("auto"))
+    res = agent2.resume()
+    assert res.status == "end_turn" and (tmp_path / "ws/a.py").read_text() == "x = 2\n"
+    assert not any("还没读过" in e["content"] for e in _results(log))
+
+
 def test_stale_file_after_bash_modification(tmp_path):
     (tmp_path / "ws").mkdir()
     (tmp_path / "ws/a.txt").write_text("one\n")

@@ -29,6 +29,8 @@ class ToolContext:
     sandbox: Optional[object] = None
     cwd: Optional[str] = None
     file_state: Optional[object] = None
+    # coding 工具读到或写下文件时回调 (path, digest)，主循环把它记成 file_state 事件
+    on_file_state: Optional[Callable[[str, str], None]] = None
     todos: list = field(default_factory=list)
 
     def spawned(self, pgid: int) -> None:

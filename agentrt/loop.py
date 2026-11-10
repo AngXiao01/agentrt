@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .context import ContextManager, truncate_middle
+from .context import CLEARED, ContextManager, truncate_middle
 from .llm import ContextLengthError, LLMError, ToolCall, normalize_usage, to_wire
 from .permissions import Decision, PermissionEngine, deny_all_approver
 from .sandboxes import SandboxLost
@@ -160,6 +160,7 @@ class Agent:
         self._live: list[dict] = []  # 最近一次循环里的消息列表（压缩会换新列表，所以单独记一份）
         self._chat_started = False
         self.ctx.on_spawn = self._on_spawn
+        self.ctx.on_file_state = self._on_file_state  # coding 工具读/写文件时把内容哈希挂到日志上
 
     # ------------------------------------------------------------ 事件
     def _on_spawn(self, call_id: str, pgid: int) -> None:
@@ -167,11 +168,60 @@ class Agent:
         子进程在独立的进程组里（超时时才能整组杀掉），代价是主进程被杀时它不会跟着退出。"""
         self._emit({"type": "tool_proc", "call_id": call_id, "pgid": pgid, "started_at": round(time.time(), 3)})
 
-    def _emit(self, event: dict) -> None:
+    def _emit(self, event: dict) -> dict:
         with self._lock:
             rec = self.log.append(event)
         if self.on_event:
             self.on_event(rec)
+        return rec
+
+    def _note(self, message: dict) -> dict:
+        """把一条消息写入日志。id 用事件 seq：投影靠它找切点，不把 id 写进消息正文。"""
+        message["id"] = self._emit({"type": "message", "message": message})["seq"]
+        return message
+
+    def _on_file_state(self, path: str, digest: str) -> None:
+        self._emit({"type": "file_state", "path": path, "digest": digest})
+
+    def _adopt_log(self, st: ReplayState) -> None:
+        """resume / 接着聊：装回 read-before-write 账本，以及跨次摘要累加的文件清单。"""
+        self._restore_ledger(st.file_digests)
+        for e in reversed(self.log.events()):
+            if e.get("type") == "compact" and "summary" in e:
+                self.cm.read_files = list(e.get("read_files") or [])
+                self.cm.modified_files = list(e.get("modified_files") or [])
+                return
+
+    def _restore_ledger(self, digests: dict) -> None:
+        if not digests:
+            return
+        from .coding_tools import FileState
+        st = self.ctx.file_state
+        if not isinstance(st, FileState):
+            st = FileState(on_change=self._on_file_state)
+            self.ctx.file_state = st
+        else:
+            st.on_change = self._on_file_state
+        st.load(digests)
+
+    def _tool_sources(self, messages: list[dict]) -> list[dict]:
+        """投影里被 microcompact 清掉的工具结果，摘要时换回日志里的原文。"""
+        need = {m.get("tool_call_id") for m in messages
+                if m.get("role") == "tool" and m.get("content") == CLEARED}
+        if not need:
+            return messages
+        originals = {}
+        for e in self.log.events():
+            if e.get("type") == "tool_result" and e.get("call_id") in need:
+                originals[e["call_id"]] = e["content"]
+        out = []
+        for m in messages:
+            cid = m.get("tool_call_id")
+            if m.get("role") == "tool" and cid in originals and m.get("content") == CLEARED:
+                out.append({**m, "content": originals[cid]})
+            else:
+                out.append(m)
+        return out
 
     # ------------------------------------------------------------ 入口
     def run(self, task: str) -> RunResult:
@@ -181,7 +231,7 @@ class Agent:
         self._emit(self._start_event(task))
         messages = [{"role": "system", "content": self.system}, {"role": "user", "content": task}]
         for m in messages:
-            self._emit({"type": "message", "message": m})
+            self._note(m)
         return self._drive(messages, t0)
 
     def send(self, text: str) -> RunResult:
@@ -191,13 +241,10 @@ class Agent:
         if not self._chat_started:
             self._chat_started = True
             self._emit(self._start_event(text))
-            self._live = [{"role": "system", "content": self.system}]
-            self._emit({"type": "message", "message": self._live[0]})
+            self._live = [self._note({"role": "system", "content": self.system})]
         self._cancel.clear()
         self._emit({"type": "turn_start", "text": text})
-        m = {"role": "user", "content": text}
-        self._live.append(m)
-        self._emit({"type": "message", "message": m})
+        self._live.append(self._note({"role": "user", "content": text}))
         self._empty_nudged = False
         return self._drive(self._live, t0)
 
@@ -217,6 +264,7 @@ class Agent:
         st = ReplayState(self.log.events())
         self._live, self._chat_started = st.messages, True
         self._serial = st.turns
+        self._adopt_log(st)
         return bool(st.messages) and st.ended is None
 
     def reset(self) -> None:
@@ -235,6 +283,7 @@ class Agent:
             self.result.final = st.ended.get("final", "")
             return self.result
         self._serial = st.turns
+        self._adopt_log(st)
         self._emit({"type": "resume", "from_seq": len(events), "prev_turns": st.turns})
         messages = st.messages
         pending = st.pending_calls()
@@ -335,8 +384,8 @@ class Agent:
             asst = self._asst_message(res)
             if res.parse_errors:
                 asst["parse_errors"] = res.parse_errors
+            self._note(asst)
             messages.append(asst)
-            self._emit({"type": "message", "message": asst})
 
             if not res.tool_calls and not res.parse_errors:
                 if res.finish_reason == "length":   # 正文写到一半被截断，也不是“做完了”
@@ -413,14 +462,17 @@ class Agent:
         self._emit({"type": "end", "status": "interrupted", "final": "", "stats": asdict(self.result)})
 
     def _maybe_compact(self, messages: list[dict]) -> list[dict]:
-        res = self.cm.maybe_autocompact(messages)
+        res = self.cm.maybe_autocompact(messages, self._tool_sources(messages))
         if res is None:
             return messages
-        new, reason = res
-        self._record_compact(messages, new, reason)
-        return new
+        _, reason = res
+        return self._record_compact(messages, reason)
 
-    def _record_compact(self, before: list[dict], after: list[dict], reason: str) -> None:
+    def _record_compact(self, before: list[dict], reason: str) -> list[dict]:
+        """追加一条 compact。模型接下来看到的是整份日志的投影，不是这里替换出来的消息副本。"""
+        plan = self.cm.last_plan
+        if plan is None:
+            return before
         r = self.result
         r.compactions += 1
         u = normalize_usage(getattr(self.cm, "last_summary_usage", None))
@@ -432,9 +484,19 @@ class Agent:
             r.cached_tokens += u["cached"]
             r.compact_tokens += u["prompt"] + u["completion"]
             r.cost_usd += self._cost(u)
-        self._emit({"type": "compact", "reason": reason, "before_tokens": self.cm.estimate(before),
-                    "after_tokens": self.cm.estimate(after), "messages": after,
-                    "summary_usage": u if (u["prompt"] or u["completion"]) else None})
+        event = {"type": "compact", "reason": reason, "before_tokens": self.cm.estimate(before),
+                 "after_tokens": self.cm.estimate(plan.view),
+                 "summary_usage": u if (u["prompt"] or u["completion"]) else None}
+        if reason == "microcompact":
+            event["cleared_ids"] = list(plan.cleared_ids)
+        else:
+            event["summary"] = plan.summary
+            event["first_kept_id"] = plan.first_kept_id
+            event["retain_none"] = plan.retain_none
+            event["read_files"] = list(plan.read_files)
+            event["modified_files"] = list(plan.modified_files)
+        self._emit(event)
+        return ReplayState(self.log.events()).messages
 
     def _maybe_wrapup(self, messages: list[dict]) -> None:
         """时限用掉 WRAPUP_AT 时提醒一次收尾。追加在末尾（harness 消息不算新一轮），前缀不变，KV cache 照样命中。"""
@@ -457,11 +519,11 @@ class Agent:
         try:
             return self._chat(messages, think), messages
         except ContextLengthError:
-            new = self.cm.reactive_compact(messages)
+            new = self.cm.reactive_compact(messages, self._tool_sources(messages))
             if new is None:
                 raise
-            self._record_compact(messages, new, "reactive")
-            return self._chat(new, think), new  # 只重试一次，再超长就交给上层
+            projected = self._record_compact(messages, "reactive")
+            return self._chat(projected, think), projected  # 只重试一次，再超长就交给上层
 
     @staticmethod
     def _asst_message(res) -> dict:
@@ -611,12 +673,12 @@ class Agent:
         if error:
             with self._lock:
                 self.result.tool_errors += 1
-        self._emit({"type": "tool_result", "call_id": call.id, "name": call.name, "content": content,
-                    "is_error": error, "seconds": round(seconds, 3),
-                    "behavior": decision.behavior if decision else None,
-                    "decision": decision.source if decision else None,
-                    "reason": decision.reason if decision else None})
-        return {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": content}
+        rec = self._emit({"type": "tool_result", "call_id": call.id, "name": call.name, "content": content,
+                          "is_error": error, "seconds": round(seconds, 3),
+                          "behavior": decision.behavior if decision else None,
+                          "decision": decision.source if decision else None,
+                          "reason": decision.reason if decision else None})
+        return {"role": "tool", "id": rec["seq"], "tool_call_id": call.id, "name": call.name, "content": content}
 
     def _feedback(self, res) -> str:
         parts = []
@@ -634,9 +696,8 @@ class Agent:
         return "\n\n".join(parts)
 
     def _user_note(self, text: str) -> dict:
-        m = {"role": "user", "content": text, "kind": "harness"}   # harness 自己插的话，不算用户的新一轮
-        self._emit({"type": "message", "message": m})
-        return m
+        # harness 自己插的话，不算用户的新一轮
+        return self._note({"role": "user", "content": text, "kind": "harness"})
 
     def _finish(self, status: str, t0: float) -> RunResult:
         r = self.result

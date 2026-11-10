@@ -5,7 +5,7 @@
 - **Agent loop**: compaction check → model call → parse tool calls → permission check → execute → feed results back. Read-only calls run in parallel; text or native function-calling protocol; reasoning replay for thinking models.
 - **Sessions**: append-only JSONL event log. A crashed session resumes from the log: read-only calls are re-run, side-effecting ones are reported to the model as "outcome unknown" instead of being repeated.
 - **Permissions**: deny / ask / allow rules, hooks, modes (plan / default / auto / bypass), human approval.
-- **Context**: oversized tool results go to disk; old results are cleared before the model is asked to summarize; reactive compaction on context-length errors.
+- **Context**: oversized tool results go to disk. Compaction appends a `compact` event (`first_kept_id`, a structured summary, files read and modified); the model view is a projection of the log. Old tool results can be masked without a model call. Reactive compaction retries once on context-length errors. The read-before-write ledger is a `file_state` event, so resume does not have to re-read.
 - **Sandboxes**: local, macOS sandbox-exec, Linux bwrap, Docker, or an existing container. Plus MCP (stdio) and read-only subagents.
 - **Web console** (`python3 -m agentrt web`): chat with the agent and watch every model call (tokens, cache hits, thinking), tool call, truncation and retry live; replay past sessions; browse benchmark runs trial by trial.
 - **Benchmarks**: runs Terminal-Bench 2.0 as a Harbor external agent. Reports separate infra failures, drop tasks the oracle can't pass, and give Wilson intervals and McNemar tests.
@@ -104,7 +104,7 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
 
 | | Managed Agents | DeepSeek Harness | agentrt |
 |---|---|---|---|
-| 会话 | `emitEvent` / `getEvents`；上下文是从日志变换出的视图 | 只追加的 `SessionEvent` 日志；“模型可见即已记录”：每次请求都能从日志 + 代码重建 | `session.py` JSONL（每条 fsync）；`session_start` 记录完整请求参数和 sandbox，assistant 消息带 reasoning，`volatile_prefix` 的时间戳写进 span |
+| 会话 | `emitEvent` / `getEvents`；上下文是从日志变换出的视图 | 只追加的 `SessionEvent` 日志；“模型可见即已记录”：每次请求都能从日志 + 代码重建 | `session.py` JSONL（每条 fsync）；`session_start` 记录完整请求参数和 sandbox，assistant 消息带 reasoning，`volatile_prefix` 的时间戳写进 span。压缩是追加的 `compact` 事件，模型视图是投影 |
 | harness | 无状态，`wake(sessionId)` | agent loop 本身也是插件 | `Agent.resume()` 从日志重建（见“故障语义”）；`resume --sandbox` 重新接上执行环境 |
 | sandbox 接口 | `execute()`；`provision()` 懒启动 | fs 与进程提供方共享一个执行世界；`read-only / workspace-write / danger-full-access`；后端报告 enforcement | `Sandbox.exec / read_bytes / write_bytes`，文件读写和 bash 走同一个后端；每次调用带 mode，后端报告 `enforcement` 和 `disposable` |
 | 容器失败 | 作为工具错误回填，下一次调用重新 provision | — | `SandboxLost` → 工具错误“执行环境丢失”；`DockerSandbox` 下一次调用重建（先用 `docker inspect` 核实，避免误判） |
@@ -132,7 +132,7 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
 
 `coding_tools.py`，一组职责单一的工具（bash / read_file / write_file / edit_file / glob / grep / todo_write），在任何 sandbox 后端上都能用：
 
-- 改文件前必须先读，且读完之后文件没被别的途径改过；记录的是内容哈希而不是 mtime，因为容器里的时钟不可信。
+- 改文件前必须先读，且读完之后文件没被别的途径改过；记录的是内容哈希而不是 mtime，因为容器里的时钟不可信。哈希写在 `file_state` 事件里，resume 时装回，不用让模型重读。
 - bash 在多次调用之间保持工作目录，不保持环境变量。
 - 超长输出落在 sandbox 的 scratch 目录，不进任务目录：SWE-bench 取 `git diff`、Terminal-Bench 的测试都会看工作目录。
 - 英文 system prompt，写明无人值守、按环境最终状态判分。
@@ -152,13 +152,13 @@ DeepSeek Harness 把同样的东西做成可替换的插件 seam。对应关系�
 | 机制 | 做法 |
 |---|---|
 | 工具结果落盘 | 超长结果全文存盘，上下文只留头尾和路径，模型需要时分页读 |
-| microcompact | 较早的可再生工具结果换成占位符，保留最近 5 条，不调模型，先于摘要尝试 |
-| autocompact | 估算超过“预算 − 缓冲”时用模型摘要早期历史；缓冲 13,000 tokens，预算小时取预算的 25% |
-| reactive compact | 服务端报上下文超长后，更激进地压一次再重试 |
+| microcompact | 追加 `cleared_ids`。投影里较早的可再生工具结果换成占位符，保留最近 5 条；不调模型，先于摘要尝试。原文留在 `tool_result` 里 |
+| autocompact | 估算超过“预算 − 缓冲”时追加一条摘要：`first_kept_id`、结构化摘要（Goal / Constraints / Progress / Decisions / Next / Critical）、截至切点累加的读过和改过的文件。缓冲 13,000 tokens，预算小时取预算的 25%。被压掉的消息还在日志里 |
+| reactive compact | 服务端报上下文超长后，同样追加一条更短的摘要再重试 |
 
 Manus 六条原则的落点：
 
-1. **围绕 KV cache 设计**：system prompt 整个会话不变，上下文只追加，压缩是唯一改写历史的地方；`prefix_break` 和 `cached_tokens` 实测效果，`volatile_prefix` 是对照组。
+1. **围绕 KV cache 设计**：system prompt 整个会话不变，日志只追加。模型看到的上下文是日志的投影，只有压缩会让这个投影不再是纯追加；`prefix_break` 和 `cached_tokens` 实测效果，`volatile_prefix` 是对照组。
 2. **Mask，不 remove**：工具列表在所有权限模式下都完整出现，限制放在权限层拦截。
 3. **文件系统当上下文**：超长输出落盘，可恢复地压缩。
 4. **复述**：`todo_write` 每次返回完整清单。
@@ -291,8 +291,8 @@ python3 -m evals.run_evals --resume evals_out/<时间>                      # �
 | 中断 | `Agent.cancel()`：下一个检查点停下，未执行的调用补“已中断”结果 | 进行中的 HTTP 请求不能立刻掐断 |
 | 权限判定 | `permissions.py`：deny → hooks → 工具自检 → allow → 模式 | — |
 | 并行 | 连续的只读调用并行（最多 10 个） | 不边流式边执行 |
-| 上下文 | 工具结果落盘、microcompact / autocompact / reactive，见“上下文管理” | 没有 snip / context collapse |
-| 会话日志与恢复 | JSONL + `resume`，见“故障语义” | — |
+| 上下文 | 工具结果落盘；compact 只追加，模型视图是投影。microcompact / autocompact / reactive，见“上下文管理” | 没有 snip / context collapse，也没有会话树 |
+| 会话日志与恢复 | JSONL + `resume`，见“故障语义”。`file_state` 恢复 read-before-write 账本 | — |
 | 任务清单 | `todo_write` | — |
 | 子 agent | `delegate`：独立上下文、只读白名单、只回摘要 | 只有同步只读版 |
 | MCP | stdio 客户端，`mcp__<server>__<tool>` | 没有 HTTP/SSE、OAuth、resources、工具延迟加载 |
@@ -376,9 +376,7 @@ python3 -m pytest -q   # 不需要模型；macOS 沙箱测试只在 macOS 上跑
 
 - Terminal-Bench 2.0 全量、多次重复的成绩（目前只有 10 题 × 1 次）。
 - Anthropic Messages 后端（thinking block 签名回放、显式 `cache_control`）；目前只有 OpenAI 兼容接口。
-- 不改写日志的压缩：现在压缩写一条带完整新消息列表的 `compact` 事件。DeepSeek Harness 的做法是 `compaction/start → summary → end` 加锁事务 + `surfaceOp: replace`，原事件不动，模型视图是投影。
-- resume 后重建 read-before-write 账本（目前要求模型重读）。
-- 流式输出；snip / context collapse；MCP 的 HTTP 传输；持久 shell（环境变量跨调用保持）。
+- 流式输出；snip / context collapse；会话树（分叉、branch summary）；MCP 的 HTTP 传输；持久 shell（环境变量跨调用保持）。
 
 ## 许可证
 

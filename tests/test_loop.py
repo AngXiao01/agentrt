@@ -149,11 +149,22 @@ def test_autocompact_keeps_system_and_recent(make_agent):
     agent, _, ws, log = make_agent(None, mode="bypass", llm=llm, context=cm)
     res = agent.run("反复打印")
     assert res.compactions >= 1
-    compact = next(e for e in log.events() if e["type"] == "compact")
-    msgs = compact["messages"]
-    assert msgs[0]["role"] == "system" and "上下文已压缩" in msgs[1]["content"]
-    assert msgs[2]["role"] != "tool"  # 不能把工具结果和它的调用切开
+    compact = next(e for e in log.events() if e["type"] == "compact" and "summary" in e)
+    assert "messages" not in compact and compact["first_kept_id"] and "read_files" in compact
+    # 原文还在日志里：压缩只追加事件，不把历史换成一份新列表
+    assert any(e.get("type") == "message" and e["message"].get("content") == "反复打印" for e in log.events())
+    assert any(e.get("type") == "tool_result" and len(e.get("content") or "") > 500 for e in log.events())
+    st = ReplayState(log.events())
+    assert st.messages[0]["role"] == "system" and "上下文已压缩" in st.messages[1]["content"]
+    assert st.messages[1]["kind"] == "summary" and st.messages[2]["role"] != "tool"
+    assert st.messages[2]["id"] == compact["first_kept_id"]
+    proj_ids = {m.get("id") for m in st.messages}
+    assert any(e["type"] == "message" and e["seq"] not in proj_ids for e in log.events())
     assert compact["after_tokens"] < compact["before_tokens"]
+    # 压缩之后模型看到的就是这条投影，不是整份日志
+    viewed = next(c for c in llm.calls if any("上下文已压缩" in (m.get("content") or "") for m in c))
+    assert all(m.get("kind") == "summary" or m.get("id") in proj_ids for m in viewed)
+    assert not any((m.get("content") or "") == "反复打印" for m in viewed)
 
 
 def test_reactive_compact_on_context_length_error(make_agent):
@@ -304,6 +315,41 @@ def test_microcompact_clears_old_results_keeps_recent():
     assert n == 3 and [m["content"] for m in tools[:3]] == [CLEARED] * 3
     assert tools[3]["content"] == "result 3" and tools[-1]["content"].startswith("不可再生")
     assert clear_old_results(msgs, keep_recent=0)[1] == 7              # 至少保留 1 条
+
+
+def test_legacy_compact_snapshot_still_replays(tmp_path):
+    """旧日志把整份消息列表嵌在 compact 里。这种事件还要能接着读。"""
+    log = EventLog(tmp_path / "s.jsonl")
+    for e in [{"type": "message", "message": {"role": "system", "content": "S"}},
+              {"type": "message", "message": {"role": "user", "content": "旧任务"}},
+              {"type": "compact", "reason": "autocompact", "messages": [
+                  {"role": "system", "content": "S"},
+                  {"role": "user", "content": "[上下文已压缩（autocompact），以下是此前工作的摘要]\n做过了"},
+                  {"role": "user", "content": "接着做"}]},
+              {"type": "message", "message": {"role": "assistant", "content": "好"}}]:
+        log.append(e)
+    st = ReplayState(log.events())
+    assert [m["content"] for m in st.messages][-2:] == ["接着做", "好"]
+    assert all(m.get("content") != "旧任务" for m in st.messages)
+
+
+def test_file_lists_accumulate_across_summaries():
+    llm = ScriptedLLM(["第一段", "第二段"])
+    cm = ContextManager(llm, max_context_tokens=1000, compact_ratio=0.01, keep_recent=1, mc_keep_recent=1)
+
+    def msgs(tag, path):
+        return [{"role": "system", "content": "s"},
+                {"role": "user", "content": tag + "x" * 400},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": tag, "name": "write_file", "arguments": {"path": path}}]},
+                {"role": "tool", "tool_call_id": tag, "name": "write_file", "content": "y" * 400},
+                {"role": "user", "content": "tail"}]
+
+    cm.maybe_autocompact(msgs("one", "a.txt"))
+    assert cm.modified_files == ["a.txt"] and cm.last_plan.summary == "第一段"
+    cm.maybe_autocompact(msgs("two", "b.txt"))
+    assert cm.modified_files == ["a.txt", "b.txt"]
+    assert "a.txt" in cm.last_plan.view[1]["content"] and "b.txt" in cm.last_plan.view[1]["content"]
 
 
 def test_autocompact_tries_microcompact_before_summarizing(make_agent):

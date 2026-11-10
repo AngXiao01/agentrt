@@ -132,8 +132,10 @@ def test_autocompact_summarizes_original_history_with_tool_calls():
     for i in range(6):
         name = "bash" if i % 2 else "write_file"   # write_file 的结果不可再生，microcompact 不清，压不下来只能摘要
         msgs += [{"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "name": name,
-                                                                       "arguments": {"command": f"cmd{i}"}}]},
+                                                                       "arguments": {"command": f"cmd{i}", "path": f"f{i}.txt"}}]},
                  {"role": "tool", "tool_call_id": f"c{i}", "name": name, "content": f"OUT{i} " + "x" * 1200}]
     new, reason = cm.maybe_autocompact(msgs)
     assert reason == "autocompact"
     assert "OUT1" in seen[0] and "cmd1" in seen[0]     # bash 结果虽被 microcompact 清过，摘要看到的仍是原文和调用
+    assert "f0.txt" in cm.last_plan.modified_files and "Modified:" in new[1]["content"]
+    assert new[1]["kind"] == "summary"
